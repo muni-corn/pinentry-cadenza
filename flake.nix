@@ -73,6 +73,14 @@
         {
           # rust setup
           devenv.shells.default = {
+            git-hooks.hooks.clippy = {
+              enable = true;
+              packageOverrides = {
+                cargo = config.rust-project.toolchain;
+                clippy = config.rust-project.toolchain;
+              };
+            };
+
             languages.rust = {
               enable = true;
               channel = "nightly";
