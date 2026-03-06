@@ -6,7 +6,8 @@ edition = "2024"
 license-file = "LICENSE"
 
 [dependencies]
-iced = "0.14"
+iced = { version = "0.14", features = ["smol"] }
 iced_layershell = "0.15"
 secrecy = "0.10"
+smol = "2.0.2"
 zeroize = "1"
