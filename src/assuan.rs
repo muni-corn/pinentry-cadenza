@@ -1,9 +1,15 @@
 use std::io::{self, BufRead, Write};
 
-use crate::state::PinentryState;
+use secrecy::ExposeSecret;
+
+use crate::{
+    gui::run_dialog,
+    state::{DialogRequest, DialogResult, PinentryState},
+};
 
 // gpg-error codes used in Assuan responses
-const ERR_NOT_IMPLEMENTED: u32 = 83886179;
+const ERR_CANCELLED: u32 = 83886205;
+const ERR_NOT_CONFIRMED: u32 = 83886179;
 const ERR_UNKNOWN_IPC_COMMAND: u32 = 275;
 
 /// Parsed representation of an Assuan command.
@@ -218,16 +224,29 @@ pub fn server_loop(state: &mut PinentryState) {
                 write_ok(&mut out, "");
             }
             Command::GetPin => {
-                // placeholder until the GUI is implemented (commit 4)
-                write_err(&mut out, ERR_NOT_IMPLEMENTED, "Not yet implemented");
+                match run_dialog(state, DialogRequest::GetPin) {
+                    DialogResult::Pin(secret) => {
+                        write_data(&mut out, &percent_encode(secret.expose_secret()));
+                        write_ok(&mut out, "");
+                    }
+                    _ => write_err(&mut out, ERR_CANCELLED, "cancelled"),
+                }
                 state.reset_per_request();
             }
-            Command::Confirm { one_button: _ } => {
-                write_err(&mut out, ERR_NOT_IMPLEMENTED, "Not yet implemented");
+            Command::Confirm { one_button } => {
+                match run_dialog(state, DialogRequest::Confirm { one_button }) {
+                    DialogResult::Confirmed => write_ok(&mut out, ""),
+                    DialogResult::NotConfirmed => {
+                        write_err(&mut out, ERR_NOT_CONFIRMED, "not confirmed")
+                    }
+                    _ => write_err(&mut out, ERR_CANCELLED, "cancelled"),
+                }
                 state.reset_per_request();
             }
             Command::Message => {
-                write_err(&mut out, ERR_NOT_IMPLEMENTED, "Not yet implemented");
+                // message dialogs are informational — always respond OK
+                let _ = run_dialog(state, DialogRequest::Message);
+                write_ok(&mut out, "");
                 state.reset_per_request();
             }
             Command::GetInfo(ref info) => {

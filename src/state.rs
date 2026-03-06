@@ -53,23 +53,25 @@ impl PinentryState {
 }
 
 /// The three interactive dialog types a pinentry must support.
-#[derive(Debug)]
-#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
 pub enum DialogRequest {
     GetPin,
-    Confirm { one_button: bool },
+    Confirm {
+        #[allow(dead_code)]
+        one_button: bool,
+    },
     Message,
 }
 
 /// The result returned from a completed dialog interaction.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum DialogResult {
     /// The user submitted a passphrase.
     Pin(SecretString),
     /// The user confirmed (OK).
     Confirmed,
     /// The user chose the "Not OK" option.
+    #[allow(dead_code)]
     NotConfirmed,
     /// The user cancelled or dismissed the dialog.
     Cancelled,

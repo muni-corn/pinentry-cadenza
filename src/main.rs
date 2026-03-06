@@ -1,5 +1,6 @@
 mod assuan;
 mod fallback;
+mod gui;
 mod state;
 
 use state::PinentryState;
