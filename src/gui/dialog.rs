@@ -1,7 +1,7 @@
 use std::sync::mpsc;
 
 use iced::{
-    Color, Element, Event, Length, Task, event,
+    Background, Border, Color, Element, Event, Length, Task, event,
     widget::{button, column, container, row, text, text_input},
 };
 use iced_layershell::{
@@ -26,7 +26,8 @@ struct AppState {
     error_text: Option<String>,
     ok_label: Option<String>,
     cancel_label: Option<String>,
-    // passphrase input buffer
+    notok_label: Option<String>,
+    // passphrase input buffer (GetPin only)
     input: String,
 }
 
@@ -38,6 +39,7 @@ struct AppState {
 #[derive(Debug, Clone)]
 enum Message {
     Submit,
+    NotConfirmed,
     Cancel,
     InputChanged(String),
     EscapePressed,
@@ -54,6 +56,7 @@ pub fn run(pinentry_state: &PinentryState, request: DialogRequest) -> DialogResu
     let error_text = pinentry_state.error.clone();
     let ok_label = pinentry_state.ok_label.clone();
     let cancel_label = pinentry_state.cancel_label.clone();
+    let notok_label = pinentry_state.notok_label.clone();
 
     let _ = iced_layershell::application(
         // boot must be Fn (not FnOnce) — clone captured values on each call
@@ -67,10 +70,14 @@ pub fn run(pinentry_state: &PinentryState, request: DialogRequest) -> DialogResu
                 error_text: error_text.clone(),
                 ok_label: ok_label.clone(),
                 cancel_label: cancel_label.clone(),
+                notok_label: notok_label.clone(),
                 input: String::new(),
             };
-            // autofocus the passphrase input as soon as the window appears
-            let focus = iced::widget::operation::focus(INPUT_ID.clone());
+            // autofocus the passphrase input; no-op for non-GetPin dialogs
+            let focus: Task<Message> = match request {
+                DialogRequest::GetPin => iced::widget::operation::focus(INPUT_ID.clone()),
+                _ => Task::none(),
+            };
             (state, focus)
         },
         || String::from("pinentry-cadenza"),
@@ -99,11 +106,13 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 DialogRequest::GetPin => DialogResult::Pin(secrecy::SecretString::from(
                     std::mem::take(&mut state.input),
                 )),
-                DialogRequest::Confirm { one_button: _ } | DialogRequest::Message => {
-                    DialogResult::Confirmed
-                }
+                DialogRequest::Confirm { .. } | DialogRequest::Message => DialogResult::Confirmed,
             };
             let _ = state.tx.send(result);
+            iced::exit()
+        }
+        Message::NotConfirmed => {
+            let _ = state.tx.send(DialogResult::NotConfirmed);
             iced::exit()
         }
         Message::Cancel | Message::EscapePressed => {
@@ -121,32 +130,28 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
 }
 
 fn view(state: &AppState) -> Element<'_, Message> {
-    use iced::Background;
+    let inner = match state.request {
+        DialogRequest::GetPin => getpin_content(state),
+        DialogRequest::Confirm { one_button: false } => confirm_content(state),
+        DialogRequest::Confirm { one_button: true } | DialogRequest::Message => {
+            one_button_content(state)
+        }
+    };
+    make_card(inner)
+}
 
-    // title row
+// -- dialog layout builders --
+
+/// Layout for `GETPIN`: title + description + error + prompt + input +
+/// Submit/Cancel.
+fn getpin_content(state: &AppState) -> Element<'_, Message> {
     let title = text(state.title.as_deref().unwrap_or("Authentication required")).size(16);
-
-    // description (may contain newlines from percent-decoded SETDESC)
     let desc = text(
         state
             .desc
             .as_deref()
             .unwrap_or("An application is asking for authentication."),
     );
-
-    // error banner: red-tinted, only rendered when SETERROR was called
-    let error_banner = state.error_text.as_ref().map(|err| {
-        container(text(err).color(Color::from_rgb(1.0, 0.35, 0.35)))
-            .padding([6, 10])
-            .width(Length::Fill)
-            .style(|_theme| container::Style {
-                background: Some(Background::Color(Color::from_rgba(1.0, 0.0, 0.0, 0.15))),
-                border: iced::Border::default().rounded(4),
-                ..Default::default()
-            })
-    });
-
-    // prompt label and secure passphrase input
     let prompt = text(state.prompt.as_deref().unwrap_or("Passphrase:"));
     let input = text_input("", &state.input)
         .id(INPUT_ID.clone())
@@ -154,28 +159,68 @@ fn view(state: &AppState) -> Element<'_, Message> {
         .on_submit(Message::Submit)
         .secure(true)
         .width(Length::Fill);
+    let buttons = button_row(vec![
+        ("Submit", state.ok_label.as_deref(), Message::Submit),
+        ("Cancel", state.cancel_label.as_deref(), Message::Cancel),
+    ]);
 
-    // buttons right-aligned using a fill spacer
-    let buttons = row![
-        iced::widget::space().width(Length::Fill),
-        button(state.ok_label.as_deref().unwrap_or("OK")).on_press(Message::Submit),
-        button(state.cancel_label.as_deref().unwrap_or("Cancel")).on_press(Message::Cancel),
-    ]
-    .spacing(8)
-    .width(Length::Fill);
-
-    // assemble card content, inserting the error banner only when present
     let mut content = column![title, desc].spacing(8);
-    if let Some(banner) = error_banner {
+    if let Some(banner) = error_banner(&state.error_text) {
         content = content.push(banner);
     }
-    let content = content
+    content
         .push(prompt)
         .push(input)
         .push(buttons)
         .spacing(8)
-        .padding(24);
+        .padding(24)
+        .into()
+}
 
+/// Layout for `CONFIRM`: description + error + Okay / [Not okay] / Cancel.
+///
+/// Shows a three-button row when `SETNOTOK` was called, two-button otherwise.
+fn confirm_content(state: &AppState) -> Element<'_, Message> {
+    let desc = text(
+        state
+            .desc
+            .as_deref()
+            .unwrap_or("An application is asking for confirmation."),
+    );
+
+    let mut btn_specs: Vec<(&str, Option<&str>, Message)> =
+        vec![("Confirm", state.ok_label.as_deref(), Message::Submit)];
+    if state.notok_label.is_some() {
+        btn_specs.push((
+            "Refuse",
+            state.notok_label.as_deref(),
+            Message::NotConfirmed,
+        ));
+    }
+    btn_specs.push(("Cancel", state.cancel_label.as_deref(), Message::Cancel));
+
+    let buttons = button_row(btn_specs);
+
+    let mut content = column![desc].spacing(8);
+    if let Some(banner) = error_banner(&state.error_text) {
+        content = content.push(banner);
+    }
+    content.push(buttons).spacing(8).padding(24).into()
+}
+
+/// Layout for `CONFIRM --one-button` and `MESSAGE`: description + single OK
+/// button.
+fn one_button_content(state: &AppState) -> Element<'_, Message> {
+    let desc = text(state.desc.as_deref().unwrap_or(""));
+    let buttons = button_row(vec![("OK", state.ok_label.as_deref(), Message::Submit)]);
+
+    column![desc, buttons].spacing(8).padding(24).into()
+}
+
+// -- shared helpers --
+
+/// Wraps `content` in a centered, max-480-px rounded card on the scrim.
+fn make_card(content: Element<'_, Message>) -> Element<'_, Message> {
     let card = container(content)
         .style(container::rounded_box)
         .max_width(480);
@@ -184,6 +229,31 @@ fn view(state: &AppState) -> Element<'_, Message> {
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// Renders a red-tinted error banner, or `None` if no error is set.
+fn error_banner(error_text: &Option<String>) -> Option<impl Into<Element<'_, Message>>> {
+    error_text.as_ref().map(|err| {
+        container(text(err).color(Color::from_rgb(1.0, 0.35, 0.35)))
+            .padding([6, 10])
+            .width(Length::Fill)
+            .style(|_theme| container::Style {
+                background: Some(Background::Color(Color::from_rgba(1.0, 0.0, 0.0, 0.15))),
+                border: Border::default().rounded(4),
+                ..Default::default()
+            })
+    })
+}
+
+/// Builds a right-aligned button row from `(fallback_label, override_label,
+/// message)` triples.
+fn button_row<'a>(specs: Vec<(&'a str, Option<&'a str>, Message)>) -> Element<'a, Message> {
+    let mut r = row![iced::widget::space().width(Length::Fill)].spacing(8);
+    for (fallback, override_label, msg) in specs {
+        let label = override_label.unwrap_or(fallback);
+        r = r.push(button(label).on_press(msg));
+    }
+    r.width(Length::Fill).into()
 }
 
 /// Keyboard listener: maps Tab and Escape to explicit messages.
