@@ -61,18 +61,31 @@
       perSystem =
         {
           config,
+          lib,
           pkgs,
           ...
         }:
         let
-          pname = "rust-app";
+          pname = "pinentry-cadenze";
 
-          buildInputs = [ ];
+          buildInputs = with pkgs; [
+            xorg.libX11
+            xorg.libXcursor
+            xorg.libXrandr
+            xorg.libXi
+            xorg.libxcb
+            libxkbcommon
+            vulkan-loader
+            wayland
+            wayland
+          ];
           nativeBuildInputs = [ ];
         in
         {
           # rust setup
           devenv.shells.default = {
+            env.LD_LIBRARY_PATH = "$LD_LIBRARY_PATH:${lib.makeLibraryPath buildInputs}";
+
             git-hooks.hooks.clippy = {
               enable = true;
               packageOverrides = {
