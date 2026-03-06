@@ -30,6 +30,8 @@ struct AppState {
     notok_label: Option<String>,
     // passphrase input buffer (GetPin only)
     input: String,
+    // tracks whether the text input has been focused yet
+    input_focused: bool,
 }
 
 /// Messages handled by the dialog application.
@@ -45,6 +47,7 @@ enum Message {
     InputChanged(String),
     EscapePressed,
     TabPressed,
+    FocusInput,
 }
 
 /// Runs the iced layer shell dialog, blocking until the user responds.
@@ -61,25 +64,18 @@ pub fn run(pinentry_state: &PinentryState, request: DialogRequest) -> DialogResu
 
     let _ = iced_layershell::application(
         // boot must be Fn (not FnOnce) — clone captured values on each call
-        move || {
-            let state = AppState {
-                tx: tx.clone(),
-                request,
-                title: title.clone(),
-                desc: desc.clone(),
-                prompt: prompt.clone(),
-                error_text: error_text.clone(),
-                ok_label: ok_label.clone(),
-                cancel_label: cancel_label.clone(),
-                notok_label: notok_label.clone(),
-                input: String::new(),
-            };
-            // autofocus the passphrase input; no-op for non-GetPin dialogs
-            let focus: Task<Message> = match request {
-                DialogRequest::GetPin => iced::widget::operation::focus(INPUT_ID.clone()),
-                _ => Task::none(),
-            };
-            (state, focus)
+        move || AppState {
+            tx: tx.clone(),
+            request,
+            title: title.clone(),
+            desc: desc.clone(),
+            prompt: prompt.clone(),
+            error_text: error_text.clone(),
+            ok_label: ok_label.clone(),
+            cancel_label: cancel_label.clone(),
+            notok_label: notok_label.clone(),
+            input: String::new(),
+            input_focused: false,
         },
         || String::from("pinentry-cadenza"),
         update,
@@ -125,6 +121,10 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::TabPressed => iced::widget::operation::focus_next(),
+        Message::FocusInput => {
+            state.input_focused = true;
+            iced::widget::operation::focus(INPUT_ID.clone())
+        }
         // layer shell runtime messages — handled transparently by the framework
         _ => Task::none(),
     }
@@ -340,8 +340,23 @@ fn on_key_event(
     }
 }
 
-fn subscription(_state: &AppState) -> iced::Subscription<Message> {
-    event::listen_with(on_key_event)
+fn subscription(state: &AppState) -> iced::Subscription<Message> {
+    use std::time::Duration;
+
+    let key_sub = event::listen_with(on_key_event);
+
+    // for GetPin, schedule a one-shot focus 750 ms after the window opens;
+    // once input_focused flips true the timer subscription is dropped
+    if let DialogRequest::GetPin = state.request
+        && !state.input_focused
+    {
+        iced::Subscription::batch([
+            key_sub,
+            iced::time::every(Duration::from_millis(750)).map(|_| Message::FocusInput),
+        ])
+    } else {
+        key_sub
+    }
 }
 
 fn style(_state: &AppState, _theme: &iced::Theme) -> iced::theme::Style {
