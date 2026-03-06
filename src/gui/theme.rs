@@ -5,7 +5,7 @@
 //! can be passed directly to widget `.style()` calls.
 
 use iced::{
-    Background, Border, Color, Shadow, Vector,
+    Background, Border, Color,
     widget::{button, container, text_input},
 };
 
@@ -70,23 +70,13 @@ pub const ERROR: Color = Color {
 // -- style functions --
 
 /// Style for the dialog card container.
-pub fn card(_theme: &iced::Theme) -> container::Style {
+pub fn card(s: f32, alpha: f32) -> container::Style {
     container::Style {
-        background: Some(Background::Color(BASE)),
+        background: Some(Background::Color(BASE).scale_alpha(alpha)),
         border: Border {
-            color: SURFACE,
-            width: 1.0,
-            radius: 12.0.into(),
-        },
-        shadow: Shadow {
-            color: Color {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.45,
-            },
-            offset: Vector { x: 0.0, y: 6.0 },
-            blur_radius: 24.0,
+            color: SURFACE.scale_alpha(alpha),
+            width: 1.0 * s,
+            radius: (12.0 * s).into(),
         },
         ..Default::default()
     }
@@ -94,26 +84,27 @@ pub fn card(_theme: &iced::Theme) -> container::Style {
 
 /// Style for the primary action button (Okay / Submit) with hover and press
 /// states.
-pub fn primary_button(_theme: &iced::Theme, status: button::Status) -> button::Style {
+pub fn primary_button(status: button::Status, s: f32, alpha: f32) -> button::Style {
     let bg = match status {
         button::Status::Hovered => lighten(ACCENT, 0.10),
         button::Status::Pressed => darken(ACCENT, 0.20),
         _ => ACCENT,
     };
     button::Style {
-        background: Some(Background::Color(bg)),
+        background: Some(Background::Color(bg.scale_alpha(alpha))),
         // dark text gives better contrast on the light accent color
-        text_color: MANTLE,
+        text_color: MANTLE.scale_alpha(alpha),
         border: Border {
-            radius: 12.0.into(),
-            ..Default::default()
+            color: Border::default().color.scale_alpha(alpha),
+            width: 2.0 * s,
+            radius: (12.0 * s).into(),
         },
         ..Default::default()
     }
 }
 
 /// Style for secondary buttons (Cancel, Not Okay) with subtle outline.
-pub fn secondary_button(_theme: &iced::Theme, status: button::Status) -> button::Style {
+pub fn secondary_button(status: button::Status, s: f32, alpha: f32) -> button::Style {
     let bg = match status {
         button::Status::Hovered => Color {
             r: 1.0,
@@ -130,35 +121,38 @@ pub fn secondary_button(_theme: &iced::Theme, status: button::Status) -> button:
         _ => Color::TRANSPARENT,
     };
     button::Style {
-        background: Some(Background::Color(bg)),
-        text_color: SUBTEXT,
+        background: Some(Background::Color(bg.scale_alpha(alpha))),
+        text_color: SUBTEXT.scale_alpha(alpha),
         border: Border {
-            color: SURFACE,
-            width: 2.0,
-            radius: 12.0.into(),
+            color: SURFACE.scale_alpha(s),
+            width: 2.0 * s,
+            radius: (12.0 * s).into(),
         },
         ..Default::default()
     }
 }
 
 /// Style for the passphrase text input with a visible focus ring.
-pub fn text_input_style(_theme: &iced::Theme, status: text_input::Status) -> text_input::Style {
+pub fn text_input_style(status: text_input::Status, s: f32, alpha: f32) -> text_input::Style {
     let (border_color, border_width) = match status {
         text_input::Status::Focused { .. } => (ACCENT, 2.0),
         text_input::Status::Hovered => (SUBTEXT, 1.0),
         _ => (SURFACE, 1.0),
     };
     text_input::Style {
-        background: Background::Color(MANTLE),
+        background: Background::Color(MANTLE).scale_alpha(alpha),
         border: Border {
-            color: border_color,
-            width: border_width,
-            radius: 12.0.into(),
+            color: border_color.scale_alpha(alpha),
+            width: border_width * s,
+            radius: (12.0 * s).into(),
         },
-        icon: SUBTEXT,
-        placeholder: SUBTEXT,
-        value: TEXT,
-        selection: Color { a: 0.35, ..ACCENT },
+        icon: SUBTEXT.scale_alpha(alpha),
+        placeholder: SUBTEXT.scale_alpha(alpha),
+        value: TEXT.scale_alpha(alpha),
+        selection: Color {
+            a: 0.35 * alpha,
+            ..ACCENT
+        },
     }
 }
 
