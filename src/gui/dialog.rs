@@ -1,7 +1,7 @@
 use std::sync::mpsc;
 
 use iced::{
-    Background, Border, Color, Element, Event, Length, Task, event,
+    Color, Element, Event, Length, Task, event,
     widget::{button, column, container, row, text, text_input},
 };
 use iced_layershell::{
@@ -10,6 +10,7 @@ use iced_layershell::{
     to_layer_message,
 };
 
+use super::theme;
 use crate::state::{DialogRequest, DialogResult, PinentryState};
 
 // widget ID used to autofocus the passphrase input on startup
@@ -145,26 +146,32 @@ fn view(state: &AppState) -> Element<'_, Message> {
 /// Layout for `GETPIN`: title + description + error + prompt + input +
 /// Submit/Cancel.
 fn getpin_content(state: &AppState) -> Element<'_, Message> {
-    let title = text(state.title.as_deref().unwrap_or("Authentication required")).size(16);
+    let title = text(state.title.as_deref().unwrap_or("Authentication required"))
+        .size(17)
+        .color(theme::TEXT);
     let desc = text(
         state
             .desc
             .as_deref()
             .unwrap_or("An application is asking for authentication."),
-    );
-    let prompt = text(state.prompt.as_deref().unwrap_or("Passphrase:"));
+    )
+    .color(theme::TEXT);
+    let prompt = text(state.prompt.as_deref().unwrap_or("Passphrase:"))
+        .size(13)
+        .color(theme::SUBTEXT);
     let input = text_input("", &state.input)
         .id(INPUT_ID.clone())
         .on_input(Message::InputChanged)
         .on_submit(Message::Submit)
         .secure(true)
-        .width(Length::Fill);
+        .width(Length::Fill)
+        .style(theme::text_input_style);
     let buttons = button_row(vec![
         ("Submit", state.ok_label.as_deref(), Message::Submit),
         ("Cancel", state.cancel_label.as_deref(), Message::Cancel),
     ]);
 
-    let mut content = column![title, desc].spacing(8);
+    let mut content = column![title, desc].spacing(12);
     if let Some(banner) = error_banner(&state.error_text) {
         content = content.push(banner);
     }
@@ -172,12 +179,12 @@ fn getpin_content(state: &AppState) -> Element<'_, Message> {
         .push(prompt)
         .push(input)
         .push(buttons)
-        .spacing(8)
-        .padding(24)
+        .spacing(12)
+        .padding(28)
         .into()
 }
 
-/// Layout for `CONFIRM`: description + error + Okay / [Not okay] / Cancel.
+/// Layout for `CONFIRM`: description + error + OK / [Not OK] / Cancel.
 ///
 /// Shows a three-button row when `SETNOTOK` was called, two-button otherwise.
 fn confirm_content(state: &AppState) -> Element<'_, Message> {
@@ -186,7 +193,8 @@ fn confirm_content(state: &AppState) -> Element<'_, Message> {
             .desc
             .as_deref()
             .unwrap_or("An application is asking for confirmation."),
-    );
+    )
+    .color(theme::TEXT);
 
     let mut btn_specs: Vec<(&str, Option<&str>, Message)> =
         vec![("Confirm", state.ok_label.as_deref(), Message::Submit)];
@@ -201,29 +209,25 @@ fn confirm_content(state: &AppState) -> Element<'_, Message> {
 
     let buttons = button_row(btn_specs);
 
-    let mut content = column![desc].spacing(8);
+    let mut content = column![desc].spacing(12);
     if let Some(banner) = error_banner(&state.error_text) {
         content = content.push(banner);
     }
-    content.push(buttons).spacing(8).padding(24).into()
+    content.push(buttons).spacing(12).padding(28).into()
 }
 
-/// Layout for `CONFIRM --one-button` and `MESSAGE`: description + single OK
-/// button.
+/// Layout for `CONFIRM --one-button` and `MESSAGE`: description + single OK.
 fn one_button_content(state: &AppState) -> Element<'_, Message> {
-    let desc = text(state.desc.as_deref().unwrap_or(""));
+    let desc = text(state.desc.as_deref().unwrap_or("")).color(theme::TEXT);
     let buttons = button_row(vec![("OK", state.ok_label.as_deref(), Message::Submit)]);
-
-    column![desc, buttons].spacing(8).padding(24).into()
+    column![desc, buttons].spacing(12).padding(28).into()
 }
 
 // -- shared helpers --
 
-/// Wraps `content` in a centered, max-480-px rounded card on the scrim.
+/// Wraps `content` in a centered, max-480-px themed card on the scrim.
 fn make_card(content: Element<'_, Message>) -> Element<'_, Message> {
-    let card = container(content)
-        .style(container::rounded_box)
-        .max_width(480);
+    let card = container(content).style(theme::card).max_width(480);
 
     iced::widget::center(card)
         .width(Length::Fill)
@@ -231,27 +235,30 @@ fn make_card(content: Element<'_, Message>) -> Element<'_, Message> {
         .into()
 }
 
-/// Renders a red-tinted error banner, or `None` if no error is set.
+/// Renders a themed error banner, or `None` if no error is set.
 fn error_banner(error_text: &Option<String>) -> Option<impl Into<Element<'_, Message>>> {
     error_text.as_ref().map(|err| {
-        container(text(err).color(Color::from_rgb(1.0, 0.35, 0.35)))
+        container(text(err).color(theme::ERROR))
             .padding([6, 10])
             .width(Length::Fill)
-            .style(|_theme| container::Style {
-                background: Some(Background::Color(Color::from_rgba(1.0, 0.0, 0.0, 0.15))),
-                border: Border::default().rounded(4),
-                ..Default::default()
-            })
+            .style(theme::error_banner)
     })
 }
 
-/// Builds a right-aligned button row from `(fallback_label, override_label,
-/// message)` triples.
+/// Builds a right-aligned button row.
+///
+/// The first entry receives the primary style; all others are styled as
+/// secondary buttons.
 fn button_row<'a>(specs: Vec<(&'a str, Option<&'a str>, Message)>) -> Element<'a, Message> {
     let mut r = row![iced::widget::space().width(Length::Fill)].spacing(8);
-    for (fallback, override_label, msg) in specs {
+    for (i, (fallback, override_label, msg)) in specs.into_iter().enumerate() {
         let label = override_label.unwrap_or(fallback);
-        r = r.push(button(label).on_press(msg));
+        let btn = if i == 0 {
+            button(label).on_press(msg).style(theme::primary_button)
+        } else {
+            button(label).on_press(msg).style(theme::secondary_button)
+        };
+        r = r.push(btn);
     }
     r.width(Length::Fill).into()
 }
@@ -286,6 +293,6 @@ fn subscription(_state: &AppState) -> iced::Subscription<Message> {
 fn style(_state: &AppState, _theme: &iced::Theme) -> iced::theme::Style {
     iced::theme::Style {
         background_color: Color::from_rgba(0.0, 0.0, 0.0, 0.65),
-        text_color: Color::WHITE,
+        text_color: theme::TEXT,
     }
 }
