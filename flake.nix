@@ -69,12 +69,12 @@
           pname = "pinentry-cadenze";
 
           buildInputs = with pkgs; [
-            xorg.libX11
-            xorg.libXcursor
-            xorg.libXrandr
-            xorg.libXi
-            xorg.libxcb
+            libx11
+            libxcb
+            libxcursor
+            libxi
             libxkbcommon
+            libxrandr
             vulkan-loader
             wayland
             wayland
