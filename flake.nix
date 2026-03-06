@@ -2,10 +2,15 @@
   description = "A Rust project";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:cachix/devenv-nixpkgs/rolling";
 
     devenv = {
       url = "github:cachix/devenv";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    crate2nix = {
+      url = "github:nix-community/crate2nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -16,11 +21,6 @@
 
     musicaloft-style = {
       url = "github:musicaloft/musicaloft-style";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
-    rust-flake = {
-      url = "github:juspay/rust-flake";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -51,9 +51,6 @@
       ];
 
       imports = [
-        inputs.rust-flake.flakeModules.default
-        inputs.rust-flake.flakeModules.nixpkgs
-
         # sets up code formatting and commit linting
         inputs.musicaloft-style.flakeModule
       ];
@@ -66,8 +63,6 @@
           ...
         }:
         let
-          pname = "pinentry-cadenze";
-
           buildInputs = with pkgs; [
             libx11
             libxcb
@@ -89,14 +84,13 @@
             git-hooks.hooks.clippy = {
               enable = true;
               packageOverrides = {
-                cargo = config.rust-project.toolchain;
-                clippy = config.rust-project.toolchain;
+                cargo = config.devenv.shells.default.languages.rust.toolchainPackage;
+                clippy = config.devenv.shells.default.languages.rust.toolchainPackage;
               };
             };
 
             languages.rust = {
               enable = true;
-              channel = "nightly";
               mold.enable = true;
             };
 
@@ -113,18 +107,8 @@
             scripts.tarp.exec = ''cargo tarpaulin --engine llvm "$@"'';
           };
 
-          # rust build settings
-          rust-project = {
-            # use the same rust toolchain from the dev shell for consistency
-            toolchain = config.devenv.shells.default.languages.rust.toolchainPackage;
+          packages.default = config.devenv.shells.default.languages.rust.import ./. { };
 
-            # specify dependencies
-            defaults.perCrate.crane.args = {
-              inherit nativeBuildInputs buildInputs;
-            };
-          };
-
-          packages.default = config.rust-project.crates.${pname}.crane.outputs.packages.${pname};
         };
     };
 }
