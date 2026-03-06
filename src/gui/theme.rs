@@ -92,11 +92,11 @@ pub fn card(_theme: &iced::Theme) -> container::Style {
     }
 }
 
-/// Style for the primary action button (OK / Submit) with hover and press
+/// Style for the primary action button (Okay / Submit) with hover and press
 /// states.
 pub fn primary_button(_theme: &iced::Theme, status: button::Status) -> button::Style {
     let bg = match status {
-        button::Status::Hovered => darken(ACCENT, 0.10),
+        button::Status::Hovered => lighten(ACCENT, 0.10),
         button::Status::Pressed => darken(ACCENT, 0.20),
         _ => ACCENT,
     };
@@ -105,27 +105,27 @@ pub fn primary_button(_theme: &iced::Theme, status: button::Status) -> button::S
         // dark text gives better contrast on the light accent color
         text_color: MANTLE,
         border: Border {
-            radius: 6.0.into(),
+            radius: 12.0.into(),
             ..Default::default()
         },
         ..Default::default()
     }
 }
 
-/// Style for secondary buttons (Cancel, Not OK) with subtle outline.
+/// Style for secondary buttons (Cancel, Not Okay) with subtle outline.
 pub fn secondary_button(_theme: &iced::Theme, status: button::Status) -> button::Style {
     let bg = match status {
         button::Status::Hovered => Color {
             r: 1.0,
             g: 1.0,
             b: 1.0,
-            a: 0.06,
+            a: 0.12,
         },
         button::Status::Pressed => Color {
             r: 1.0,
             g: 1.0,
             b: 1.0,
-            a: 0.12,
+            a: 0.06,
         },
         _ => Color::TRANSPARENT,
     };
@@ -134,8 +134,8 @@ pub fn secondary_button(_theme: &iced::Theme, status: button::Status) -> button:
         text_color: SUBTEXT,
         border: Border {
             color: SURFACE,
-            width: 1.0,
-            radius: 6.0.into(),
+            width: 2.0,
+            radius: 12.0.into(),
         },
         ..Default::default()
     }
@@ -153,7 +153,7 @@ pub fn text_input_style(_theme: &iced::Theme, status: text_input::Status) -> tex
         border: Border {
             color: border_color,
             width: border_width,
-            radius: 6.0.into(),
+            radius: 12.0.into(),
         },
         icon: SUBTEXT,
         placeholder: SUBTEXT,
@@ -188,6 +188,16 @@ fn darken(c: Color, amount: f32) -> Color {
         r: (c.r - amount).max(0.0),
         g: (c.g - amount).max(0.0),
         b: (c.b - amount).max(0.0),
+        a: c.a,
+    }
+}
+
+/// Darkens a color by subtracting `amount` from each RGB channel.
+fn lighten(c: Color, amount: f32) -> Color {
+    Color {
+        r: (c.r + amount).min(1.0),
+        g: (c.g + amount).min(1.0),
+        b: (c.b + amount).min(1.0),
         a: c.a,
     }
 }

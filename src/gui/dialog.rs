@@ -361,7 +361,7 @@ fn subscription(state: &AppState) -> iced::Subscription<Message> {
 
 fn style(_state: &AppState, _theme: &iced::Theme) -> iced::theme::Style {
     iced::theme::Style {
-        background_color: Color::from_rgba(0.0, 0.0, 0.0, 0.65),
+        background_color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
         text_color: theme::TEXT,
     }
 }
