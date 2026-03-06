@@ -156,10 +156,7 @@ fn getpin_content(state: &AppState) -> Element<'_, Message> {
             .unwrap_or("An application is asking for authentication."),
     )
     .color(theme::TEXT);
-    let prompt = text(state.prompt.as_deref().unwrap_or("Passphrase:"))
-        .size(13)
-        .color(theme::SUBTEXT);
-    let input = text_input("", &state.input)
+    let input = text_input(state.prompt.as_deref().unwrap_or(""), &state.input)
         .id(INPUT_ID.clone())
         .on_input(Message::InputChanged)
         .on_submit(Message::Submit)
@@ -167,8 +164,16 @@ fn getpin_content(state: &AppState) -> Element<'_, Message> {
         .width(Length::Fill)
         .style(theme::text_input_style);
     let buttons = button_row(vec![
-        ("Submit", state.ok_label.as_deref(), Message::Submit),
-        ("Cancel", state.cancel_label.as_deref(), Message::Cancel),
+        ButtonSpec {
+            default_prompt: "Cancel",
+            prompt_override: state.cancel_label.as_deref(),
+            message: Message::Cancel,
+        },
+        ButtonSpec {
+            default_prompt: "Submit",
+            prompt_override: state.ok_label.as_deref(),
+            message: Message::Submit,
+        },
     ]);
 
     let mut content = column![title, desc].spacing(12);
@@ -176,7 +181,6 @@ fn getpin_content(state: &AppState) -> Element<'_, Message> {
         content = content.push(banner);
     }
     content
-        .push(prompt)
         .push(input)
         .push(buttons)
         .spacing(12)
@@ -196,16 +200,24 @@ fn confirm_content(state: &AppState) -> Element<'_, Message> {
     )
     .color(theme::TEXT);
 
-    let mut btn_specs: Vec<(&str, Option<&str>, Message)> =
-        vec![("Confirm", state.ok_label.as_deref(), Message::Submit)];
+    let mut btn_specs = vec![ButtonSpec {
+        default_prompt: "Cancel",
+        prompt_override: state.cancel_label.as_deref(),
+        message: Message::Cancel,
+    }];
+
     if state.notok_label.is_some() {
-        btn_specs.push((
-            "Refuse",
-            state.notok_label.as_deref(),
-            Message::NotConfirmed,
-        ));
+        btn_specs.push(ButtonSpec {
+            default_prompt: "Refuse",
+            prompt_override: state.notok_label.as_deref(),
+            message: Message::NotConfirmed,
+        });
     }
-    btn_specs.push(("Cancel", state.cancel_label.as_deref(), Message::Cancel));
+    btn_specs.push(ButtonSpec {
+        default_prompt: "Confirm",
+        prompt_override: state.ok_label.as_deref(),
+        message: Message::Submit,
+    });
 
     let buttons = button_row(btn_specs);
 
@@ -219,7 +231,11 @@ fn confirm_content(state: &AppState) -> Element<'_, Message> {
 /// Layout for `CONFIRM --one-button` and `MESSAGE`: description + single OK.
 fn one_button_content(state: &AppState) -> Element<'_, Message> {
     let desc = text(state.desc.as_deref().unwrap_or("")).color(theme::TEXT);
-    let buttons = button_row(vec![("OK", state.ok_label.as_deref(), Message::Submit)]);
+    let buttons = button_row(vec![ButtonSpec {
+        default_prompt: "OK",
+        prompt_override: state.ok_label.as_deref(),
+        message: Message::Submit,
+    }]);
     column![desc, buttons].spacing(12).padding(28).into()
 }
 
@@ -245,21 +261,59 @@ fn error_banner(error_text: &Option<String>) -> Option<impl Into<Element<'_, Mes
     })
 }
 
+struct ButtonSpec<'a> {
+    default_prompt: &'a str,
+    prompt_override: Option<&'a str>,
+    message: Message,
+}
+
 /// Builds a right-aligned button row.
 ///
 /// The first entry receives the primary style; all others are styled as
 /// secondary buttons.
-fn button_row<'a>(specs: Vec<(&'a str, Option<&'a str>, Message)>) -> Element<'a, Message> {
-    let mut r = row![iced::widget::space().width(Length::Fill)].spacing(8);
-    for (i, (fallback, override_label, msg)) in specs.into_iter().enumerate() {
-        let label = override_label.unwrap_or(fallback);
-        let btn = if i == 0 {
-            button(label).on_press(msg).style(theme::primary_button)
+fn button_row<'a>(specs: Vec<ButtonSpec<'a>>) -> Element<'a, Message> {
+    let specs_count = specs.len();
+    let mut iter = specs.into_iter().enumerate();
+    let space = iced::widget::space().width(Length::Fill);
+    let mut r = if let Some((
+        _,
+        ButtonSpec {
+            default_prompt,
+            prompt_override,
+            message,
+        },
+    )) = iter.next()
+    {
+        let label = prompt_override.unwrap_or(default_prompt);
+        let btn = button(label)
+            .on_press(message)
+            .style(theme::secondary_button);
+        row![btn, space]
+    } else {
+        row![space]
+    }
+    .spacing(8);
+
+    for (
+        i,
+        ButtonSpec {
+            default_prompt,
+            prompt_override,
+            message,
+        },
+    ) in iter
+    {
+        let label = prompt_override.unwrap_or(default_prompt);
+        let btn = if i < specs_count - 1 {
+            button(label)
+                .on_press(message)
+                .style(theme::secondary_button)
         } else {
-            button(label).on_press(msg).style(theme::secondary_button)
+            button(label).on_press(message).style(theme::primary_button)
         };
         r = r.push(btn);
     }
+
     r.width(Length::Fill).into()
 }
 
