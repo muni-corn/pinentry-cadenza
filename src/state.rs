@@ -15,7 +15,7 @@ pub struct PinentryState {
     pub keyinfo: Option<String>,
     pub repeat_prompt: Option<String>,
     pub repeat_error: Option<String>,
-    /// Non-None when SETQUALITYBAR was called; empty string means use default
+    /// Some when SETQUALITYBAR was called; empty string means use default
     /// label.
     pub quality_bar: Option<String>,
     pub quality_bar_tt: Option<String>,
