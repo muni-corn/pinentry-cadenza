@@ -4,13 +4,13 @@
   inputs = {
     nixpkgs.url = "github:cachix/devenv-nixpkgs/rolling";
 
-    devenv = {
-      url = "github:cachix/devenv";
+    crate2nix = {
+      url = "github:nix-community/crate2nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    crate2nix = {
-      url = "github:nix-community/crate2nix";
+    devenv = {
+      url = "github:cachix/devenv";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -63,7 +63,9 @@
           ...
         }:
         let
+          pname = "pinentry-cadenza";
           buildInputs = with pkgs; [
+            libgcc
             libx11
             libxcb
             libxcursor
@@ -72,20 +74,23 @@
             libxrandr
             vulkan-loader
             wayland
-            wayland
           ];
-          nativeBuildInputs = [ ];
+          nativeBuildInputs = with pkgs; [ autoPatchelfHook ];
+          libraryPath = lib.makeLibraryPath buildInputs;
+
+          toolchain = config.devenv.shells.default.languages.rust.toolchainPackage;
         in
         {
           # rust setup
           devenv.shells.default = {
-            env.LD_LIBRARY_PATH = "$LD_LIBRARY_PATH:${lib.makeLibraryPath buildInputs}";
+            # needed for dynamic linking at runtime
+            env.RUSTFLAGS = lib.mkForce "-C link-args=-Wl,-fuse-ld=mold,-rpath,${libraryPath}";
 
             git-hooks.hooks.clippy = {
               enable = true;
               packageOverrides = {
-                cargo = config.devenv.shells.default.languages.rust.toolchainPackage;
-                clippy = config.devenv.shells.default.languages.rust.toolchainPackage;
+                cargo = toolchain;
+                clippy = toolchain;
               };
             };
 
@@ -107,8 +112,18 @@
             scripts.tarp.exec = ''cargo tarpaulin --engine llvm "$@"'';
           };
 
-          packages.default = config.devenv.shells.default.languages.rust.import ./. { };
-
+          packages.default =
+            let
+              args = {
+                crateOverrides = pkgs.defaultCrateOverrides // {
+                  ${pname} = attrs: {
+                    inherit buildInputs nativeBuildInputs;
+                    runtimeDependencies = buildInputs;
+                  };
+                };
+              };
+            in
+            config.devenv.shells.default.languages.rust.import ./. args;
         };
     };
 }
