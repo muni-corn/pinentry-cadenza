@@ -83,9 +83,6 @@
         {
           # rust setup
           devenv.shells.default = {
-            # needed for dynamic linking at runtime
-            env.RUSTFLAGS = lib.mkForce "-C link-args=-Wl,-fuse-ld=mold,-rpath,${libraryPath}";
-
             git-hooks.hooks.clippy = {
               enable = true;
               packageOverrides = {
@@ -97,6 +94,9 @@
             languages.rust = {
               enable = true;
               mold.enable = true;
+
+              # needed for dynamic linking at runtime
+              rustflags = "-C link-args=-Wl,-fuse-ld=mold,-rpath,${libraryPath}";
             };
 
             packages =
