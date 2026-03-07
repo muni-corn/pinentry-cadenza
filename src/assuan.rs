@@ -151,8 +151,9 @@ pub fn write_data(w: &mut impl Write, data: &str) {
 pub fn server_loop(state: &mut PinentryState) {
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    let pid = std::process::id();
 
-    writeln!(out, "OK Pleased to meet you").expect("write error");
+    writeln!(out, "OK Pleased to meet you, process {pid}").expect("write error");
     out.flush().expect("flush error");
 
     let stdin = io::stdin();
