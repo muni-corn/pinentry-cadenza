@@ -105,6 +105,10 @@
                 bacon
                 cargo-outdated
                 cargo-tarpaulin
+
+                # for testing fallback
+                pinentry-curses
+                pinentry-tty
               ]
               ++ buildInputs
               ++ nativeBuildInputs;
