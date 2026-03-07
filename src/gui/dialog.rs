@@ -1,5 +1,6 @@
 use std::{sync::mpsc, time::Duration};
 
+use anyhow::Result;
 use iced::{
     Animation, Color, Element, Event, Length, Padding, Task,
     animation::Easing,
@@ -82,7 +83,7 @@ enum Message {
 }
 
 /// Runs the iced layer shell dialog, blocking until the user responds.
-pub fn run(pinentry_state: &PinentryState, request: DialogRequest) -> DialogResult {
+pub fn run(pinentry_state: &PinentryState, request: DialogRequest) -> Result<DialogResult> {
     let (tx, rx) = mpsc::channel::<DialogResult>();
 
     let title = pinentry_state.title.clone();
@@ -93,7 +94,7 @@ pub fn run(pinentry_state: &PinentryState, request: DialogRequest) -> DialogResu
     let cancel_label = pinentry_state.cancel_label.clone();
     let notok_label = pinentry_state.notok_label.clone();
 
-    let _ = iced_layershell::application(
+    iced_layershell::application(
         // boot must be Fn (not FnOnce) — clone captured values on each call
         move || {
             let mut anim = Animation::new(false)
@@ -134,9 +135,9 @@ pub fn run(pinentry_state: &PinentryState, request: DialogRequest) -> DialogResu
         start_mode: StartMode::Active,
         ..Default::default()
     })
-    .run();
+    .run()?;
 
-    rx.try_recv().unwrap_or(DialogResult::Cancelled)
+    Ok(rx.try_recv().unwrap_or(DialogResult::Cancelled))
 }
 
 fn update(state: &mut AppState, message: Message) -> Task<Message> {
@@ -184,7 +185,9 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
 /// Ignores subsequent calls so that double-clicks cannot change the stored
 /// result.
 fn begin_exit(state: &mut AppState, result: DialogResult) -> Task<Message> {
-    let _ = state.tx.send(result);
+    if let Err(e) = state.tx.send(result) {
+        eprintln!("critical: couldn't send dialog result! {e}");
+    };
     if !state.is_closing {
         state.anim.go_mut(false, Instant::now());
         state.is_closing = true;

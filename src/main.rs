@@ -15,5 +15,7 @@ fn main() {
     }
 
     let mut state = PinentryState::default();
-    assuan::server_loop(&mut state);
+    if let Err(e) = assuan::server_loop(&mut state) {
+        eprintln!("server loop failed: {e}")
+    };
 }

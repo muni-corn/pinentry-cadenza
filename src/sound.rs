@@ -9,14 +9,17 @@ use std::process::Command;
 /// error is silently ignored.
 pub fn play_dialog_sound() {
     // fire-and-forget: errors are benign (missing binary, no sound theme, etc.)
-    let _ = Command::new("canberra-gtk-play")
+    if let Err(e) = Command::new("canberra-gtk-play")
         .args([
             "--id",
             "dialog-question-authentication",
             "--description",
             "Authentication required",
         ])
-        .spawn();
+        .spawn()
+    {
+        eprintln!("couldn't play dialog sound: {e}")
+    }
 }
 
 /// Plays the authentication error sound in the background.
@@ -29,12 +32,15 @@ pub fn play_dialog_sound() {
 #[allow(dead_code)]
 pub fn play_error_sound() {
     // fire-and-forget: errors are benign (missing binary, no sound theme, etc.)
-    let _ = Command::new("canberra-gtk-play")
+    if let Err(e) = Command::new("canberra-gtk-play")
         .args([
             "--id",
             "dialog-error-authentication",
             "--description",
-            "Authentication required",
+            "Incorrect password",
         ])
-        .spawn();
+        .spawn()
+    {
+        eprintln!("couldn't play dialog error sound: {e}")
+    }
 }

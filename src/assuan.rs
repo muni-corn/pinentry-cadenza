@@ -1,5 +1,6 @@
 use std::io::{self, BufRead, Write};
 
+use anyhow::Result;
 use secrecy::ExposeSecret;
 
 use crate::{
@@ -148,7 +149,7 @@ pub fn write_data(w: &mut impl Write, data: &str) {
 ///
 /// Emits the Assuan greeting, then reads commands from stdin and writes
 /// responses to stdout until `BYE` is received or stdin is closed.
-pub fn server_loop(state: &mut PinentryState) {
+pub fn server_loop(state: &mut PinentryState) -> Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let pid = std::process::id();
@@ -225,7 +226,7 @@ pub fn server_loop(state: &mut PinentryState) {
                 write_ok(&mut out, "");
             }
             Command::GetPin => {
-                match run_dialog(state, DialogRequest::GetPin) {
+                match run_dialog(state, DialogRequest::GetPin)? {
                     DialogResult::Pin(secret) => {
                         write_data(&mut out, &percent_encode(secret.expose_secret()));
                         write_ok(&mut out, "");
@@ -235,7 +236,7 @@ pub fn server_loop(state: &mut PinentryState) {
                 state.reset_per_request();
             }
             Command::Confirm { one_button } => {
-                match run_dialog(state, DialogRequest::Confirm { one_button }) {
+                match run_dialog(state, DialogRequest::Confirm { one_button })? {
                     DialogResult::Confirmed => write_ok(&mut out, ""),
                     DialogResult::NotConfirmed => {
                         write_err(&mut out, ERR_NOT_CONFIRMED, "not confirmed")
@@ -246,7 +247,7 @@ pub fn server_loop(state: &mut PinentryState) {
             }
             Command::Message => {
                 // message dialogs are informational — always respond OK
-                let _ = run_dialog(state, DialogRequest::Message);
+                run_dialog(state, DialogRequest::Message)?;
                 write_ok(&mut out, "");
                 state.reset_per_request();
             }
@@ -277,6 +278,7 @@ pub fn server_loop(state: &mut PinentryState) {
             }
         }
     }
+    Ok(())
 }
 
 /// Splits a trimmed line into its first word and the remainder.
