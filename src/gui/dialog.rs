@@ -1,474 +1,358 @@
-use std::{sync::mpsc, time::Duration};
+use std::{
+    cell::Cell,
+    rc::Rc,
+    sync::{OnceLock, mpsc},
+    time::Duration,
+};
 
 use anyhow::Result;
-use iced::{
-    Animation, Color, Element, Event, Length, Padding, Task,
-    animation::Easing,
-    event,
-    time::Instant,
-    widget::{Row, button, column, container, text, text_input},
-};
-use iced_layershell::{
-    reexport::{Anchor, KeyboardInteractivity, Layer},
-    settings::{LayerShellSettings, StartMode},
-    to_layer_message,
-};
+use gtk4::{gdk, glib, prelude::*};
+use gtk4_layer_shell::LayerShell;
 
-use super::theme;
 use crate::state::{DialogRequest, DialogResult, PinentryState};
 
-// widget ID used to autofocus the passphrase input on startup
-const INPUT_ID: iced::widget::Id = iced::widget::Id::new("passphrase-input");
+// duration of the enter and exit CSS opacity transitions
+const ANIM_MS: u64 = 220;
 
-// base sizes at scale 1.0
-const TITLE_SIZE: f32 = 17.0;
-const DESC_SIZE: f32 = 15.0;
-const INPUT_SIZE: f32 = 15.0;
-const BTN_SIZE: f32 = 14.0;
-const BTN_PADDING: (f32, f32) = (12.0, 24.0);
-const CARD_MAX_WIDTH: f32 = 480.0;
-const CARD_PADDING: f32 = 28.0;
-const SPACING: f32 = 12.0;
+// loaded once per process lifetime into the default display's style context
+static CSS_LOADED: OnceLock<()> = OnceLock::new();
 
-// The scale for UI elements when the dialog is "away"; i.e. about to enter or just exited.
-const SCALE_GONE: f32 = 0.75;
+const CSS: &str = "
+.pinentry-scrim {
+    background-color: rgba(0, 0, 0, 0.5);
+    transition: opacity 220ms ease-out;
+    opacity: 0;
+}
+.pinentry-scrim.visible {
+    opacity: 1;
+}
+.pinentry-card {
+    transition: opacity 220ms ease-out;
+    opacity: 0;
+}
+.pinentry-card.visible {
+    opacity: 1;
+}
+";
 
-/// Internal iced application state for a single dialog invocation.
-struct AppState {
+/// Shared per-dialog state accessed from multiple GTK signal handlers.
+struct Ctx {
     tx: mpsc::Sender<DialogResult>,
-    request: DialogRequest,
-
-    // dialog text (snapshotted from PinentryState)
-    title: Option<String>,
-    desc: Option<String>,
-    prompt: Option<String>,
-    error_text: Option<String>,
-    ok_label: Option<String>,
-    cancel_label: Option<String>,
-    notok_label: Option<String>,
-
-    /// Passphrase input buffer (GetPin only)
-    input: String,
-
-    /// Tracks whether the text input has been focused yet
-    input_focused: bool,
-
-    /// Enter/exit animation: false = hidden/small, true = visible/full
-    anim: Animation<bool>,
-
-    /// True until the entry animation has fully settled
-    is_opening: bool,
-
-    /// True until the exit animation has fully settled
-    is_closing: bool,
+    main_loop: glib::MainLoop,
+    scrim: gtk4::Box,
+    card: gtk4::Box,
+    /// Guards against double-close (e.g. button click + keyboard shortcut).
+    closing: Cell<bool>,
 }
 
-/// Messages handled by the dialog application.
-///
-/// The `#[to_layer_message]` attribute injects additional layer-shell-specific
-/// variants (e.g. `AnchorChange`, `SizeChange`) used internally by the runtime.
-#[to_layer_message]
-#[derive(Debug, Clone)]
-enum Message {
-    Submit,
-    NotConfirmed,
-    Cancel,
-    InputChanged(String),
-    EscapePressed,
-    TabPressed,
-    FocusInput,
+impl Ctx {
+    /// Sends `result`, starts the exit animation, and schedules main loop quit.
+    ///
+    /// Ignores subsequent calls so that double-clicks cannot change the result.
+    fn close(&self, result: DialogResult) {
+        if self.closing.get() {
+            return;
+        }
+        self.closing.set(true);
 
-    /// Fired on every display frame while an animation is in progress.
-    Tick(Instant),
+        let _ = self.tx.send(result);
+
+        // start exit animation by removing the visible class
+        self.scrim.remove_css_class("visible");
+        self.card.remove_css_class("visible");
+
+        // quit after the transition finishes (slight buffer over ANIM_MS)
+        let ml = self.main_loop.clone();
+        glib::timeout_add_local_once(Duration::from_millis(ANIM_MS + 20), move || {
+            ml.quit();
+        });
+    }
 }
 
-/// Runs the iced layer shell dialog, blocking until the user responds.
+/// Runs the GTK4 layer-shell dialog and blocks until the user responds.
 pub fn run(pinentry_state: &PinentryState, request: DialogRequest) -> Result<DialogResult> {
     let (tx, rx) = mpsc::channel::<DialogResult>();
 
-    let title = pinentry_state.title.clone();
-    let desc = pinentry_state.desc.clone();
-    let prompt = pinentry_state.prompt.clone();
-    let error_text = pinentry_state.error.clone();
-    let ok_label = pinentry_state.ok_label.clone();
-    let cancel_label = pinentry_state.cancel_label.clone();
-    let notok_label = pinentry_state.notok_label.clone();
+    // load animation CSS once — additive providers on the same display are fine
+    CSS_LOADED.get_or_init(|| {
+        let provider = gtk4::CssProvider::new();
+        provider.load_from_data(CSS);
+        if let Some(display) = gdk::Display::default() {
+            gtk4::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+    });
 
-    iced_layershell::application(
-        // boot must be Fn (not FnOnce) — clone captured values on each call
-        move || {
-            let mut anim = Animation::new(false)
-                .duration(Duration::from_millis(250))
-                .easing(Easing::EaseOutCubic);
+    let main_loop = glib::MainLoop::new(None, false);
 
-            // begin the enter animation immediately
-            anim.go_mut(true, Instant::now() + Duration::from_millis(200));
+    // fullscreen scrim (dark overlay that covers the entire output)
+    let scrim = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+    scrim.add_css_class("pinentry-scrim");
 
-            AppState {
-                tx: tx.clone(),
-                request,
-                title: title.clone(),
-                desc: desc.clone(),
-                prompt: prompt.clone(),
-                error_text: error_text.clone(),
-                ok_label: ok_label.clone(),
-                cancel_label: cancel_label.clone(),
-                notok_label: notok_label.clone(),
-                input: String::new(),
-                input_focused: false,
-                anim,
-                is_opening: true,
-                is_closing: false,
+    // dialog card — centered within the scrim, max 460 px wide
+    let card = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .halign(gtk4::Align::Center)
+        .spacing(12)
+        .margin_top(24)
+        .margin_bottom(24)
+        .margin_start(24)
+        .margin_end(24)
+        .width_request(460)
+        .build();
+    card.add_css_class("card");
+    card.add_css_class("pinentry-card");
+
+    let ctx = Rc::new(Ctx {
+        tx,
+        main_loop: main_loop.clone(),
+        scrim: scrim.clone(),
+        card: card.clone(),
+        closing: Cell::new(false),
+    });
+
+    build_content(&card, pinentry_state, request, Rc::clone(&ctx));
+
+    // vertical spacers to center the card
+    let top_space = gtk4::Box::builder().vexpand(true).build();
+    let bot_space = gtk4::Box::builder().vexpand(true).build();
+    scrim.append(&top_space);
+    scrim.append(&card);
+    scrim.append(&bot_space);
+
+    let window = gtk4::Window::builder()
+        .title("pinentry-cadenza")
+        .decorated(false)
+        .child(&scrim)
+        .build();
+
+    // configure as a Wayland layer-shell surface anchored to all four edges
+    window.init_layer_shell();
+    window.set_layer(gtk4_layer_shell::Layer::Overlay);
+    window.set_anchor(gtk4_layer_shell::Edge::Top, true);
+    window.set_anchor(gtk4_layer_shell::Edge::Bottom, true);
+    window.set_anchor(gtk4_layer_shell::Edge::Left, true);
+    window.set_anchor(gtk4_layer_shell::Edge::Right, true);
+    window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::Exclusive);
+
+    // Escape cancels the dialog
+    let key_ctrl = gtk4::EventControllerKey::new();
+    {
+        let ctx = Rc::clone(&ctx);
+        key_ctrl.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                ctx.close(DialogResult::Cancelled);
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
             }
-        },
-        || String::from("pinentry-cadenza"),
-        update,
-        view,
-    )
-    .style(style)
-    .subscription(subscription)
-    .layer_settings(LayerShellSettings {
-        anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
-        layer: Layer::Overlay,
-        exclusive_zone: -1,
-        keyboard_interactivity: KeyboardInteractivity::Exclusive,
-        start_mode: StartMode::Active,
-        ..Default::default()
-    })
-    .run()?;
+        });
+    }
+    window.add_controller(key_ctrl);
+
+    window.present();
+
+    // trigger enter animation on the next main-loop iteration (after the
+    // window has been mapped and painted at least once)
+    {
+        let scrim = scrim.clone();
+        let card = card.clone();
+        glib::idle_add_local_once(move || {
+            scrim.add_css_class("visible");
+            card.add_css_class("visible");
+        });
+    }
+
+    main_loop.run();
+    window.destroy();
 
     Ok(rx.try_recv().unwrap_or(DialogResult::Cancelled))
 }
 
-fn update(state: &mut AppState, message: Message) -> Task<Message> {
-    match message {
-        Message::Submit => {
-            let result = match state.request {
-                DialogRequest::GetPin => DialogResult::Pin(secrecy::SecretString::from(
-                    std::mem::take(&mut state.input),
-                )),
-                DialogRequest::Confirm { .. } | DialogRequest::Message => DialogResult::Confirmed,
-            };
-            begin_exit(state, result)
-        }
-        Message::NotConfirmed => begin_exit(state, DialogResult::NotConfirmed),
-        Message::Cancel | Message::EscapePressed => begin_exit(state, DialogResult::Cancelled),
-        Message::InputChanged(s) => {
-            state.input = s;
-            Task::none()
-        }
-        Message::TabPressed => iced::widget::operation::focus_next(),
-        Message::FocusInput => {
-            state.input_focused = true;
-            iced::widget::operation::focus(INPUT_ID.clone())
-        }
-        Message::Tick(now) => {
-            if !state.anim.is_animating(now) {
-                // clear the entry flag once the enter animation settles
-                if state.is_opening {
-                    state.is_opening = false;
-                }
-                // once the exit animation settles, deliver the result and quit
-                if state.is_closing {
-                    return iced::exit();
-                }
-            }
-            Task::none()
-        }
-        // layer shell runtime messages — handled transparently by the framework
-        _ => Task::none(),
-    }
-}
+// -- content builders ---------------------------------------------------------
 
-/// Starts the exit animation and stores `result` for delivery when it finishes.
-///
-/// Ignores subsequent calls so that double-clicks cannot change the stored
-/// result.
-fn begin_exit(state: &mut AppState, result: DialogResult) -> Task<Message> {
-    if let Err(e) = state.tx.send(result) {
-        eprintln!("critical: couldn't send dialog result! {e}");
-    };
-    if !state.is_closing {
-        state.anim.go_mut(false, Instant::now());
-        state.is_closing = true;
-    }
-    Task::none()
-}
-
-fn view(state: &AppState) -> Element<'_, Message> {
-    let s = state.anim.interpolate(SCALE_GONE, 1.0, Instant::now());
-    let alpha = state.anim.interpolate(0.0_f32, 1.0_f32, Instant::now());
-    let inner = match state.request {
-        DialogRequest::GetPin => getpin_content(state, s, alpha),
-        DialogRequest::Confirm { one_button: false } => confirm_content(state, s, alpha),
+fn build_content(card: &gtk4::Box, state: &PinentryState, request: DialogRequest, ctx: Rc<Ctx>) {
+    match request {
+        DialogRequest::GetPin => build_getpin(card, state, ctx),
+        DialogRequest::Confirm { one_button: false } => build_confirm(card, state, ctx),
         DialogRequest::Confirm { one_button: true } | DialogRequest::Message => {
-            one_button_content(state, s, alpha)
+            build_one_button(card, state, ctx);
         }
-    };
-    make_card(s, alpha, inner)
-}
-
-// -- dialog layout builders --
-
-/// Layout for `GETPIN`: title + description + error + prompt + input +
-/// Submit/Cancel.
-fn getpin_content(state: &AppState, s: f32, alpha: f32) -> Element<'_, Message> {
-    let title = text(state.title.as_deref().unwrap_or("Authentication required"))
-        .size(TITLE_SIZE * s)
-        .color(theme::TEXT.scale_alpha(alpha));
-
-    let desc = text(
-        state
-            .desc
-            .as_deref()
-            .unwrap_or("An application is asking for authentication."),
-    )
-    .size(DESC_SIZE * s)
-    .color(theme::TEXT.scale_alpha(alpha));
-
-    let input = text_input(state.prompt.as_deref().unwrap_or(""), &state.input)
-        .id(INPUT_ID.clone())
-        .on_input(Message::InputChanged)
-        .on_submit(Message::Submit)
-        .secure(true)
-        .size(INPUT_SIZE * s)
-        .width(Length::Fill)
-        .style(move |_, status| theme::text_input_style(status, s, alpha))
-        .padding(button_padding(s));
-
-    let buttons = button_row(
-        vec![
-            ButtonSpec {
-                default_prompt: "Cancel",
-                prompt_override: state.cancel_label.as_deref(),
-                message: Message::Cancel,
-            },
-            ButtonSpec {
-                default_prompt: "Submit",
-                prompt_override: state.ok_label.as_deref(),
-                message: Message::Submit,
-            },
-        ],
-        s,
-        alpha,
-    );
-
-    let mut content = column![title, desc].spacing(SPACING * s);
-    if let Some(banner) = error_banner(&state.error_text, s) {
-        content = content.push(banner);
     }
-    content
-        .push(input)
-        .push(buttons)
-        .spacing(SPACING * s)
-        .padding(CARD_PADDING * s)
-        .into()
 }
 
-/// Layout for `CONFIRM`: description + error + OK / [Not OK] / Cancel.
-///
-/// Shows a three-button row when `SETNOTOK` was called, two-button otherwise.
-fn confirm_content(state: &AppState, s: f32, alpha: f32) -> Element<'_, Message> {
-    let desc = text(
-        state
-            .desc
-            .as_deref()
-            .unwrap_or("An application is asking for confirmation."),
-    )
-    .size(DESC_SIZE * s)
-    .color(theme::TEXT.scale_alpha(alpha));
+/// Builds the GETPIN layout: title + description + optional error + password
+/// entry + Submit/Cancel buttons.
+fn build_getpin(card: &gtk4::Box, state: &PinentryState, ctx: Rc<Ctx>) {
+    let title = gtk4::Label::builder()
+        .label(state.title.as_deref().unwrap_or("Authentication required"))
+        .halign(gtk4::Align::Start)
+        .wrap(true)
+        .build();
+    title.add_css_class("title-4");
+    card.append(&title);
 
-    let mut btn_specs = vec![ButtonSpec {
-        default_prompt: "Cancel",
-        prompt_override: state.cancel_label.as_deref(),
-        message: Message::Cancel,
-    }];
+    let desc = gtk4::Label::builder()
+        .label(
+            state
+                .desc
+                .as_deref()
+                .unwrap_or("An application is asking for authentication."),
+        )
+        .halign(gtk4::Align::Start)
+        .wrap(true)
+        .build();
+    card.append(&desc);
 
-    if state.notok_label.is_some() {
-        btn_specs.push(ButtonSpec {
-            default_prompt: "Refuse",
-            prompt_override: state.notok_label.as_deref(),
-            message: Message::NotConfirmed,
+    if let Some(err) = &state.error {
+        card.append(&build_error_banner(err));
+    }
+
+    let entry = gtk4::PasswordEntry::builder()
+        .placeholder_text(state.prompt.as_deref().unwrap_or("Passphrase"))
+        .hexpand(true)
+        .build();
+
+    // Enter key inside the entry submits the passphrase
+    {
+        let ctx = Rc::clone(&ctx);
+        let entry_ref = entry.clone();
+        entry.connect_activate(move |_| {
+            let passphrase = entry_ref.text().to_string();
+            ctx.close(DialogResult::Pin(secrecy::SecretString::from(passphrase)));
         });
     }
-    btn_specs.push(ButtonSpec {
-        default_prompt: "Confirm",
-        prompt_override: state.ok_label.as_deref(),
-        message: Message::Submit,
+    card.append(&entry);
+
+    let btn_row = build_btn_row();
+
+    let cancel_btn = gtk4::Button::with_label(state.cancel_label.as_deref().unwrap_or("Cancel"));
+    {
+        let ctx = Rc::clone(&ctx);
+        cancel_btn.connect_clicked(move |_| ctx.close(DialogResult::Cancelled));
+    }
+    btn_row.append(&cancel_btn);
+
+    let submit_btn = gtk4::Button::with_label(state.ok_label.as_deref().unwrap_or("Submit"));
+    submit_btn.add_css_class("suggested-action");
+    {
+        let ctx = Rc::clone(&ctx);
+        let entry_ref = entry.clone();
+        submit_btn.connect_clicked(move |_| {
+            let passphrase = entry_ref.text().to_string();
+            ctx.close(DialogResult::Pin(secrecy::SecretString::from(passphrase)));
+        });
+    }
+    btn_row.append(&submit_btn);
+
+    card.append(&btn_row);
+
+    // auto-focus the entry after the window maps
+    glib::idle_add_local_once(move || {
+        entry.grab_focus();
     });
+}
 
-    let buttons = button_row(btn_specs, s, alpha);
+/// Builds the CONFIRM layout: description + optional error + OK / [Not OK] /
+/// Cancel buttons.
+fn build_confirm(card: &gtk4::Box, state: &PinentryState, ctx: Rc<Ctx>) {
+    let desc = gtk4::Label::builder()
+        .label(
+            state
+                .desc
+                .as_deref()
+                .unwrap_or("An application is asking for confirmation."),
+        )
+        .halign(gtk4::Align::Start)
+        .wrap(true)
+        .build();
+    card.append(&desc);
 
-    let mut content = column![desc].spacing(SPACING * s);
-    if let Some(banner) = error_banner(&state.error_text, s) {
-        content = content.push(banner);
+    if let Some(err) = &state.error {
+        card.append(&build_error_banner(err));
     }
-    content
-        .push(buttons)
-        .spacing(SPACING * s)
-        .padding(CARD_PADDING * s)
-        .into()
-}
 
-/// Layout for `CONFIRM --one-button` and `MESSAGE`: description + single OK.
-fn one_button_content(state: &AppState, s: f32, alpha: f32) -> Element<'_, Message> {
-    let desc = text(state.desc.as_deref().unwrap_or("")).color(theme::TEXT);
-    let buttons = button_row(
-        vec![ButtonSpec {
-            default_prompt: "OK",
-            prompt_override: state.ok_label.as_deref(),
-            message: Message::Submit,
-        }],
-        s,
-        alpha,
-    );
-    column![desc, buttons]
-        .spacing(SPACING * s)
-        .padding(CARD_PADDING * s)
-        .into()
-}
+    let btn_row = build_btn_row();
 
-// -- shared helpers --
-
-/// Wraps `content` in a centered, scaled card on the scrim.
-///
-/// `max_width` scales with `s` so the dialog grows from a smaller footprint
-/// during the enter animation.
-fn make_card(s: f32, alpha: f32, content: Element<'_, Message>) -> Element<'_, Message> {
-    let card = container(content)
-        .style(move |_| theme::card(s, alpha))
-        .max_width(CARD_MAX_WIDTH * s);
-
-    iced::widget::center(card)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-}
-
-/// Renders a themed error banner, or `None` if no error is set.
-fn error_banner(error_text: &Option<String>, s: f32) -> Option<impl Into<Element<'_, Message>>> {
-    error_text.as_ref().map(|err| {
-        container(text(err).size(DESC_SIZE * s).color(theme::ERROR))
-            .padding([6.0 * s, 10.0 * s])
-            .width(Length::Fill)
-            .style(theme::error_banner)
-    })
-}
-
-struct ButtonSpec<'a> {
-    default_prompt: &'a str,
-    prompt_override: Option<&'a str>,
-    message: Message,
-}
-
-/// Builds a right-aligned button row with scaled text.
-///
-/// The last entry receives the primary style; all others are secondary.
-fn button_row<'a>(specs: Vec<ButtonSpec<'a>>, s: f32, alpha: f32) -> Element<'a, Message> {
-    let specs_count = specs.len();
-    let mut iter = specs.into_iter().enumerate();
-    let space = iced::widget::space().width(Length::Fill);
-    let mut r = Row::new().spacing(SPACING * s);
-
-    if let Some((
-        _,
-        ButtonSpec {
-            default_prompt,
-            prompt_override,
-            message,
-        },
-    )) = iter.next()
+    let cancel_btn = gtk4::Button::with_label(state.cancel_label.as_deref().unwrap_or("Cancel"));
     {
-        let label = prompt_override.unwrap_or(default_prompt);
-        let btn_text = text(label).size(BTN_SIZE * s);
-        let btn = button(btn_text)
-            .on_press(message)
-            .style(move |_, status| theme::secondary_button(status, s, alpha))
-            .padding(button_padding(s));
-        r = r.push(btn);
+        let ctx = Rc::clone(&ctx);
+        cancel_btn.connect_clicked(move |_| ctx.close(DialogResult::Cancelled));
+    }
+    btn_row.append(&cancel_btn);
+
+    if let Some(notok_label) = &state.notok_label {
+        let notok_btn = gtk4::Button::with_label(notok_label.as_str());
+        {
+            let ctx = Rc::clone(&ctx);
+            notok_btn.connect_clicked(move |_| ctx.close(DialogResult::NotConfirmed));
+        }
+        btn_row.append(&notok_btn);
     }
 
-    r = r.push(space);
-
-    for (
-        i,
-        ButtonSpec {
-            default_prompt,
-            prompt_override,
-            message,
-        },
-    ) in iter
+    let ok_btn = gtk4::Button::with_label(state.ok_label.as_deref().unwrap_or("Confirm"));
+    ok_btn.add_css_class("suggested-action");
     {
-        let label = prompt_override.unwrap_or(default_prompt);
-        let btn_text = text(label).size(BTN_SIZE * s);
-        let btn = if i < specs_count - 1 {
-            button(btn_text)
-                .on_press(message)
-                .style(move |_, status| theme::secondary_button(status, s, alpha))
-                .padding(button_padding(s))
-        } else {
-            button(btn_text)
-                .on_press(message)
-                .style(move |_, status| theme::primary_button(status, s, alpha))
-                .padding(button_padding(s))
-        };
-        r = r.push(btn);
+        let ctx = Rc::clone(&ctx);
+        ok_btn.connect_clicked(move |_| ctx.close(DialogResult::Confirmed));
     }
-    r.into()
+    btn_row.append(&ok_btn);
+
+    card.append(&btn_row);
 }
 
-/// Keyboard listener: maps Tab and Escape to explicit messages.
-///
-/// Must be a free function (not a closure) because `event::listen_with`
-/// requires a function pointer.
-fn on_key_event(
-    event: iced::Event,
-    _status: event::Status,
-    _window: iced::window::Id,
-) -> Option<Message> {
-    use iced::keyboard::{Event as KeyEvent, Key, key::Named};
-    match event {
-        Event::Keyboard(KeyEvent::KeyPressed {
-            key: Key::Named(Named::Escape),
-            ..
-        }) => Some(Message::EscapePressed),
-        Event::Keyboard(KeyEvent::KeyPressed {
-            key: Key::Named(Named::Tab),
-            ..
-        }) => Some(Message::TabPressed),
-        _ => None,
+/// Builds the one-button layout used for `CONFIRM --one-button` and `MESSAGE`.
+fn build_one_button(card: &gtk4::Box, state: &PinentryState, ctx: Rc<Ctx>) {
+    let desc = gtk4::Label::builder()
+        .label(state.desc.as_deref().unwrap_or(""))
+        .halign(gtk4::Align::Start)
+        .wrap(true)
+        .build();
+    card.append(&desc);
+
+    let ok_btn = gtk4::Button::with_label(state.ok_label.as_deref().unwrap_or("OK"));
+    ok_btn.add_css_class("suggested-action");
+    ok_btn.set_halign(gtk4::Align::End);
+    {
+        let ctx = Rc::clone(&ctx);
+        ok_btn.connect_clicked(move |_| ctx.close(DialogResult::Confirmed));
     }
+    card.append(&ok_btn);
 }
 
-fn subscription(state: &AppState) -> iced::Subscription<Message> {
-    let key_sub = event::listen_with(on_key_event);
+// -- shared helpers -----------------------------------------------------------
 
-    // drive redraws during the enter animation (animating_entry) and exit
-    let frame_sub = if state.is_opening || state.is_closing {
-        iced::window::frames().map(Message::Tick)
-    } else {
-        iced::Subscription::none()
-    };
-
-    // one-shot 500 ms timer to focus the passphrase input after the window opens
-    let focus_sub = if matches!(state.request, DialogRequest::GetPin) && !state.input_focused {
-        iced::time::every(Duration::from_millis(500)).map(|_| Message::FocusInput)
-    } else {
-        iced::Subscription::none()
-    };
-
-    iced::Subscription::batch([key_sub, frame_sub, focus_sub])
+/// Creates a right-aligned horizontal button row.
+fn build_btn_row() -> gtk4::Box {
+    gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .halign(gtk4::Align::End)
+        .build()
 }
 
-fn style(state: &AppState, _theme: &iced::Theme) -> iced::theme::Style {
-    // fade the scrim in during enter and out during exit
-    let alpha = state.anim.interpolate(0.0_f32, 0.5_f32, Instant::now());
-    iced::theme::Style {
-        background_color: Color::from_rgba(0.0, 0.0, 0.0, alpha),
-        text_color: theme::TEXT,
-    }
-}
+/// Builds a compact error banner with the `error` CSS class.
+fn build_error_banner(error: &str) -> gtk4::Box {
+    let banner = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .margin_top(4)
+        .margin_bottom(4)
+        .build();
+    banner.add_css_class("error");
 
-fn button_padding(s: f32) -> Padding {
-    [BTN_PADDING.0 * s, BTN_PADDING.1 * s].into()
+    let label = gtk4::Label::builder()
+        .label(error)
+        .halign(gtk4::Align::Start)
+        .wrap(true)
+        .hexpand(true)
+        .build();
+    banner.append(&label);
+    banner
 }

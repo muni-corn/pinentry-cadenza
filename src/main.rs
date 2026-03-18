@@ -14,6 +14,10 @@ fn main() {
         fallback::exec_pinentry_curses(&args);
     }
 
+    // initialize GTK before the server loop so the display connection is ready
+    // when the first dialog is requested
+    gtk4::init().expect("failed to initialize GTK");
+
     let mut state = PinentryState::default();
     if let Err(e) = assuan::server_loop(&mut state) {
         eprintln!("server loop failed: {e}")
