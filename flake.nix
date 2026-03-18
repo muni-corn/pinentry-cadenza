@@ -65,17 +65,16 @@
         let
           pname = "pinentry-cadenza";
           buildInputs = with pkgs; [
+            gtk4
+            gtk4-layer-shell
             libgcc
-            libx11
-            libxcb
-            libxcursor
-            libxi
             libxkbcommon
-            libxrandr
-            vulkan-loader
             wayland
           ];
-          nativeBuildInputs = with pkgs; [ autoPatchelfHook ];
+          nativeBuildInputs = with pkgs; [
+            autoPatchelfHook
+            pkg-config
+          ];
           libraryPath = lib.makeLibraryPath buildInputs;
 
           toolchain = config.devenv.shells.default.languages.rust.toolchainPackage;
@@ -105,6 +104,7 @@
                 bacon
                 cargo-outdated
                 cargo-tarpaulin
+                pkg-config
 
                 # for testing fallback
                 pinentry-curses
