@@ -7,8 +7,7 @@ license-file = "LICENSE"
 
 [dependencies]
 anyhow = "1.0.102"
-iced = { version = "0.14", features = ["smol"] }
-iced_layershell = "0.15"
+gtk4 = "0.10"
+gtk4-layer-shell = "0.7"
 secrecy = "0.10"
-smol = "2.0.2"
 zeroize = "1"
