@@ -121,25 +121,25 @@ pub fn percent_encode(s: &str) -> String {
 }
 
 /// Writes `OK [msg]` to `w` and flushes.
-pub fn write_ok(w: &mut impl Write, msg: &str) {
+pub fn write_ok(w: &mut impl Write, msg: &str) -> io::Result<()> {
     if msg.is_empty() {
-        writeln!(w, "OK").expect("write error");
+        writeln!(w, "OK")?;
     } else {
-        writeln!(w, "OK {msg}").expect("write error");
+        writeln!(w, "OK {msg}")?;
     }
-    w.flush().expect("flush error");
+    w.flush()
 }
 
 /// Writes `ERR <code> <msg>` to `w` and flushes.
-pub fn write_err(w: &mut impl Write, code: u32, msg: &str) {
-    writeln!(w, "ERR {code} {msg}").expect("write error");
-    w.flush().expect("flush error");
+pub fn write_err(w: &mut impl Write, code: u32, msg: &str) -> io::Result<()> {
+    writeln!(w, "ERR {code} {msg}")?;
+    w.flush()
 }
 
 /// Writes `D <data>` to `w` and flushes.
-pub fn write_data(w: &mut impl Write, data: &str) {
-    writeln!(w, "D {data}").expect("write error");
-    w.flush().expect("flush error");
+pub fn write_data(w: &mut impl Write, data: &str) -> io::Result<()> {
+    writeln!(w, "D {data}")?;
+    w.flush()
 }
 
 /// Runs the Assuan server loop.
@@ -159,8 +159,8 @@ pub fn server_loop(
     let mut out = stdout.lock();
     let pid = std::process::id();
 
-    writeln!(out, "OK Pleased to meet you, process {pid}").expect("write error");
-    out.flush().expect("flush error");
+    writeln!(out, "OK Pleased to meet you, process {pid}")?;
+    out.flush()?;
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -179,107 +179,107 @@ pub fn server_loop(
         match parse_command(line) {
             Command::SetDesc(s) => {
                 state.desc = Some(s);
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::SetPrompt(s) => {
                 state.prompt = Some(s);
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::SetTitle(s) => {
                 state.title = Some(s);
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::SetOk(s) => {
                 state.ok_label = Some(s);
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::SetCancel(s) => {
                 state.cancel_label = Some(s);
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::SetNotOk(s) => {
                 state.notok_label = Some(s);
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::SetError(s) => {
                 state.error = Some(s);
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::SetTimeout(secs) => {
                 state.timeout = Some(secs);
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::SetKeyInfo(s) => {
                 state.keyinfo = Some(s);
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::SetRepeat(s) => {
                 state.repeat_prompt = Some(s);
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::SetRepeatError(s) => {
                 state.repeat_error = Some(s);
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::SetQualityBar(label) => {
                 // empty string signals "show with default label"
                 state.quality_bar = Some(label.unwrap_or_default());
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::SetQualityBarTooltip(s) => {
                 state.quality_bar_tt = Some(s);
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::GetPin => {
                 match show_dialog(state, DialogRequest::GetPin)? {
                     DialogResult::Pin(secret) => {
-                        write_data(&mut out, &percent_encode(secret.expose_secret()));
-                        write_ok(&mut out, "");
+                        write_data(&mut out, &percent_encode(secret.expose_secret()))?;
+                        write_ok(&mut out, "")?;
                     }
-                    _ => write_err(&mut out, ERR_CANCELLED, "cancelled"),
+                    _ => write_err(&mut out, ERR_CANCELLED, "cancelled")?,
                 }
                 state.reset_per_request();
             }
             Command::Confirm { one_button } => {
                 match show_dialog(state, DialogRequest::Confirm { one_button })? {
-                    DialogResult::Confirmed => write_ok(&mut out, ""),
+                    DialogResult::Confirmed => write_ok(&mut out, "")?,
                     DialogResult::NotConfirmed => {
-                        write_err(&mut out, ERR_NOT_CONFIRMED, "not confirmed")
+                        write_err(&mut out, ERR_NOT_CONFIRMED, "not confirmed")?
                     }
-                    _ => write_err(&mut out, ERR_CANCELLED, "cancelled"),
+                    _ => write_err(&mut out, ERR_CANCELLED, "cancelled")?,
                 }
                 state.reset_per_request();
             }
             Command::Message => {
                 // message dialogs are informational — always respond OK
                 show_dialog(state, DialogRequest::Message)?;
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
                 state.reset_per_request();
             }
             Command::GetInfo(ref info) => {
-                dispatch_getinfo(&mut out, state, info);
+                dispatch_getinfo(&mut out, state, info)?;
             }
             Command::Option(key, value) => {
                 apply_option(state, &key, value);
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::Reset => {
                 state.reset_per_request();
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::Bye => {
-                write_ok(&mut out, "closing connection");
+                write_ok(&mut out, "closing connection")?;
                 break;
             }
             Command::Nop => {
-                write_ok(&mut out, "");
+                write_ok(&mut out, "")?;
             }
             Command::Unknown(ref cmd) => {
                 write_err(
                     &mut out,
                     ERR_UNKNOWN_IPC_COMMAND,
                     &format!("unknown command '{cmd}'"),
-                );
+                )?;
             }
         }
     }
@@ -316,19 +316,19 @@ fn parse_option(arg: &str) -> Command {
 }
 
 /// Handles a `GETINFO` command, writing the response to `out`.
-fn dispatch_getinfo(out: &mut impl Write, state: &PinentryState, info: &str) {
+fn dispatch_getinfo(out: &mut impl Write, state: &PinentryState, info: &str) -> io::Result<()> {
     match info.to_ascii_lowercase().as_str() {
         "version" => {
-            write_data(out, env!("CARGO_PKG_VERSION"));
-            write_ok(out, "");
+            write_data(out, env!("CARGO_PKG_VERSION"))?;
+            write_ok(out, "")?;
         }
         "pid" => {
-            write_data(out, &std::process::id().to_string());
-            write_ok(out, "");
+            write_data(out, &std::process::id().to_string())?;
+            write_ok(out, "")?;
         }
         "flavor" => {
-            write_data(out, "cadenza");
-            write_ok(out, "");
+            write_data(out, "cadenza")?;
+            write_ok(out, "")?;
         }
         "ttyinfo" => {
             let ttyname = state.ttyname.as_deref().unwrap_or("-");
@@ -338,13 +338,14 @@ fn dispatch_getinfo(out: &mut impl Write, state: &PinentryState, info: &str) {
             write_data(
                 out,
                 &format!("{ttyname} {ttytype} {lc_ctype} {lc_messages}"),
-            );
-            write_ok(out, "");
+            )?;
+            write_ok(out, "")?;
         }
         _ => {
-            write_err(out, ERR_UNKNOWN_IPC_COMMAND, "unknown getinfo query");
+            write_err(out, ERR_UNKNOWN_IPC_COMMAND, "unknown getinfo query")?;
         }
     }
+    Ok(())
 }
 
 /// Applies a key-value option from an `OPTION` command to `state`.
