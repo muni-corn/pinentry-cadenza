@@ -1,7 +1,7 @@
 use secrecy::SecretString;
 
 /// Accumulated state from Assuan SET* commands and OPTION configuration.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PinentryState {
     // per-dialog fields (cleared by reset_per_request)
     pub desc: Option<String>,
