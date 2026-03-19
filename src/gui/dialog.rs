@@ -1,21 +1,17 @@
-use std::{
-    cell::Cell,
-    rc::Rc,
-    sync::{OnceLock, mpsc},
-    time::Duration,
-};
+use std::{fmt, sync::mpsc, time::Duration};
 
-use anyhow::Result;
 use gtk4::{gdk, glib, prelude::*};
 use gtk4_layer_shell::LayerShell;
+use relm4::prelude::*;
+use secrecy::SecretString;
 
-use crate::state::{DialogRequest, DialogResult, PinentryState};
+use crate::{
+    assuan, sound,
+    state::{DialogRequest, DialogResult, PinentryState},
+};
 
 // duration of the enter and exit CSS opacity transitions
 const ANIM_MS: u64 = 220;
-
-// loaded once per process lifetime into the default display's style context
-static CSS_LOADED: OnceLock<()> = OnceLock::new();
 
 const CSS: &str = "
 .pinentry-scrim {
@@ -24,7 +20,7 @@ const CSS: &str = "
     opacity: 0;
 }
 .pinentry-scrim.visible {
-    opacity: 1;
+    opacity: 0.5;
 }
 .pinentry-card {
     transition: opacity 220ms ease-out;
@@ -35,169 +31,341 @@ const CSS: &str = "
 }
 ";
 
-/// Shared per-dialog state accessed from multiple GTK signal handlers.
-struct Ctx {
-    tx: mpsc::Sender<DialogResult>,
-    main_loop: glib::MainLoop,
+// -- message types ------------------------------------------------------------
+
+/// Wraps `mpsc::SyncSender` to provide `Debug` without exposing internals.
+pub(crate) struct ResultSender(mpsc::SyncSender<DialogResult>);
+
+impl fmt::Debug for ResultSender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResultSender").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+pub struct ShowDialogContext {
+    state: PinentryState,
+    request: DialogRequest,
+    result_tx: ResultSender,
+}
+
+/// Messages handled by the `PinentryApp` component.
+#[derive(Debug)]
+pub enum PinentryAppMsg {
+    /// The Assuan server is requesting a dialog be shown to the user.
+    ShowDialog(Box<ShowDialogContext>),
+    /// The user has made a choice (submit, confirm, cancel).
+    Submit(DialogResult),
+    /// The exit animation has finished — it is safe to hide the window.
+    ExitAnimationDone,
+    /// The Assuan server loop has finished — the app should quit.
+    ServerExited,
+}
+
+// -- model --------------------------------------------------------------------
+
+struct ActiveDialog {
+    state: PinentryState,
+    request: DialogRequest,
+    result_tx: ResultSender,
+}
+
+/// Root Relm4 component for the pinentry application.
+///
+/// Owns a persistent (but initially hidden) fullscreen Wayland overlay window.
+/// When a dialog is needed, the Assuan thread sends `ShowDialog`; the component
+/// builds and shows the dialog, the user interacts, and the result is returned
+/// to the Assuan thread via the per-dialog channel.
+pub struct PinentryApp {
+    /// Active dialog being shown, if any.
+    active: Option<ActiveDialog>,
+    /// Monotonically increasing counter; bumped on each new `ShowDialog` so
+    /// `update_view` knows when to rebuild the card content.
+    dialog_id: u64,
+    /// True while the exit animation is in progress.
+    closing: bool,
+}
+
+// -- widgets ------------------------------------------------------------------
+
+pub struct PinentryAppWidgets {
+    /// The root window (stored so `update_view` can show and hide it).
+    window: gtk4::Window,
+    /// Full-screen dark overlay — holds the `.pinentry-scrim` CSS class.
     scrim: gtk4::Box,
+    /// Centered dialog card — holds the `.pinentry-card` CSS class.
     card: gtk4::Box,
-    /// Guards against double-close (e.g. button click + keyboard shortcut).
-    closing: Cell<bool>,
+    /// Inner content area inside the card; rebuilt for each new dialog.
+    card_content: gtk4::Box,
+    /// Tracks which `dialog_id` has been rendered into `card_content`.
+    rendered_dialog_id: u64,
 }
 
-impl Ctx {
-    /// Sends `result`, starts the exit animation, and schedules main loop quit.
-    ///
-    /// Ignores subsequent calls so that double-clicks cannot change the result.
-    fn close(&self, result: DialogResult) {
-        if self.closing.get() {
-            return;
-        }
-        self.closing.set(true);
+// -- component implementation -------------------------------------------------
 
-        let _ = self.tx.send(result);
+impl SimpleComponent for PinentryApp {
+    type Init = ();
+    type Input = PinentryAppMsg;
+    type Output = ();
+    type Root = gtk4::Window;
+    type Widgets = PinentryAppWidgets;
 
-        // start exit animation by removing the visible class
-        self.scrim.remove_css_class("visible");
-        self.card.remove_css_class("visible");
-
-        // quit after the transition finishes (slight buffer over ANIM_MS)
-        let ml = self.main_loop.clone();
-        glib::timeout_add_local_once(Duration::from_millis(ANIM_MS + 20), move || {
-            ml.quit();
-        });
+    fn init_root() -> Self::Root {
+        gtk4::Window::builder()
+            .title("pinentry-cadenza")
+            .decorated(false)
+            .build()
     }
-}
 
-/// Runs the GTK4 layer-shell dialog and blocks until the user responds.
-pub fn run(pinentry_state: &PinentryState, request: DialogRequest) -> Result<DialogResult> {
-    let (tx, rx) = mpsc::channel::<DialogResult>();
+    fn init(
+        _init: Self::Init,
+        root: Self::Root,
+        sender: ComponentSender<Self>,
+    ) -> ComponentParts<Self> {
+        // load CSS once — safe to call unconditionally since it is only ever
+        // called once by relm4 during init
+        relm4::set_global_css(CSS);
 
-    // load animation CSS once — additive providers on the same display are fine
-    CSS_LOADED.get_or_init(|| {
-        let provider = gtk4::CssProvider::new();
-        provider.load_from_data(CSS);
-        if let Some(display) = gdk::Display::default() {
-            gtk4::style_context_add_provider_for_display(
-                &display,
-                &provider,
-                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
+        // configure the window as a fullscreen wayland layer-shell overlay
+        root.init_layer_shell();
+        root.set_layer(gtk4_layer_shell::Layer::Overlay);
+        root.set_anchor(gtk4_layer_shell::Edge::Top, true);
+        root.set_anchor(gtk4_layer_shell::Edge::Bottom, true);
+        root.set_anchor(gtk4_layer_shell::Edge::Left, true);
+        root.set_anchor(gtk4_layer_shell::Edge::Right, true);
+        root.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::Exclusive);
+
+        // scrim: full-viewport dark overlay
+        let scrim = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .vexpand(true)
+            .hexpand(true)
+            .build();
+        scrim.add_css_class("pinentry-scrim");
+
+        // card: centered dialog panel (max 460 px wide)
+        let card = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .halign(gtk4::Align::Center)
+            .spacing(12)
+            .margin_top(24)
+            .margin_bottom(24)
+            .margin_start(24)
+            .margin_end(24)
+            .width_request(460)
+            .build();
+        card.add_css_class("card");
+        card.add_css_class("pinentry-card");
+
+        // card_content: swappable inner area rebuilt on each ShowDialog
+        let card_content = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(12)
+            .build();
+        card.append(&card_content);
+
+        // vertical spacers so the card floats in the middle of the scrim
+        let top_space = gtk4::Box::builder().vexpand(true).build();
+        let bot_space = gtk4::Box::builder().vexpand(true).build();
+        scrim.append(&top_space);
+        scrim.append(&card);
+        scrim.append(&bot_space);
+
+        root.set_child(Some(&scrim));
+
+        // Escape key cancels the active dialog
+        let key_ctrl = gtk4::EventControllerKey::new();
+        {
+            let sender = sender.clone();
+            key_ctrl.connect_key_pressed(move |_, key, _, _| {
+                if key == gdk::Key::Escape {
+                    sender.input(PinentryAppMsg::Submit(DialogResult::Cancelled));
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            });
         }
-    });
+        root.add_controller(key_ctrl);
 
-    let main_loop = glib::MainLoop::new(None, false);
+        // spawn the Assuan server on a background thread so it can block on
+        // stdin without freezing the GTK event loop
+        {
+            let thread_sender = sender.input_sender().clone();
+            std::thread::spawn(move || {
+                let mut state = PinentryState::default();
+                let result = assuan::server_loop(&mut state, |state, request| {
+                    // create a one-shot channel for this dialog's result
+                    let (result_tx, result_rx) = mpsc::sync_channel(1);
 
-    // fullscreen scrim (dark overlay that covers the entire output)
-    let scrim = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .vexpand(true)
-        .hexpand(true)
-        .build();
-    scrim.add_css_class("pinentry-scrim");
+                    thread_sender.emit(PinentryAppMsg::ShowDialog(Box::new(ShowDialogContext {
+                        state: state.clone(),
+                        request,
+                        result_tx: ResultSender(result_tx),
+                    })));
 
-    // dialog card — centered within the scrim, max 460 px wide
-    let card = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .halign(gtk4::Align::Center)
-        .spacing(12)
-        .margin_top(24)
-        .margin_bottom(24)
-        .margin_start(24)
-        .margin_end(24)
-        .width_request(460)
-        .build();
-    card.add_css_class("card");
-    card.add_css_class("pinentry-card");
+                    // block until the GTK thread delivers the user's response
+                    Ok(result_rx.recv().unwrap_or(DialogResult::Cancelled))
+                });
 
-    let ctx = Rc::new(Ctx {
-        tx,
-        main_loop: main_loop.clone(),
-        scrim: scrim.clone(),
-        card: card.clone(),
-        closing: Cell::new(false),
-    });
+                if let Err(e) = result {
+                    eprintln!("server loop failed: {e}");
+                }
 
-    build_content(&card, pinentry_state, request, Rc::clone(&ctx));
+                thread_sender.emit(PinentryAppMsg::ServerExited);
+            });
+        }
 
-    // vertical spacers to center the card
-    let top_space = gtk4::Box::builder().vexpand(true).build();
-    let bot_space = gtk4::Box::builder().vexpand(true).build();
-    scrim.append(&top_space);
-    scrim.append(&card);
-    scrim.append(&bot_space);
+        let model = PinentryApp {
+            active: None,
+            dialog_id: 0,
+            closing: false,
+        };
 
-    let window = gtk4::Window::builder()
-        .title("pinentry-cadenza")
-        .decorated(false)
-        .child(&scrim)
-        .build();
+        let widgets = PinentryAppWidgets {
+            window: root,
+            scrim,
+            card,
+            card_content,
+            rendered_dialog_id: 0,
+        };
 
-    // configure as a Wayland layer-shell surface anchored to all four edges
-    window.init_layer_shell();
-    window.set_layer(gtk4_layer_shell::Layer::Overlay);
-    window.set_anchor(gtk4_layer_shell::Edge::Top, true);
-    window.set_anchor(gtk4_layer_shell::Edge::Bottom, true);
-    window.set_anchor(gtk4_layer_shell::Edge::Left, true);
-    window.set_anchor(gtk4_layer_shell::Edge::Right, true);
-    window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::Exclusive);
+        ComponentParts { model, widgets }
+    }
 
-    // Escape cancels the dialog
-    let key_ctrl = gtk4::EventControllerKey::new();
-    {
-        let ctx = Rc::clone(&ctx);
-        key_ctrl.connect_key_pressed(move |_, key, _, _| {
-            if key == gdk::Key::Escape {
-                ctx.close(DialogResult::Cancelled);
-                glib::Propagation::Stop
-            } else {
-                glib::Propagation::Proceed
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
+        match msg {
+            PinentryAppMsg::ShowDialog(ctx) => {
+                let ShowDialogContext {
+                    state,
+                    request,
+                    result_tx,
+                } = *ctx;
+
+                // play the appropriate sound for this dialog
+                if state.error.is_some() {
+                    sound::play_error_sound();
+                } else {
+                    sound::play_dialog_sound();
+                }
+
+                self.dialog_id += 1;
+                self.closing = false;
+                self.active = Some(ActiveDialog {
+                    state,
+                    request,
+                    result_tx,
+                });
             }
-        });
+
+            PinentryAppMsg::Submit(result) => {
+                if self.active.is_none() {
+                    return;
+                }
+
+                // deliver the result to the waiting Assuan thread before
+                // starting the exit animation
+                if let Some(active) = self.active.take() {
+                    let _ = active.result_tx.0.send(result);
+                }
+
+                self.closing = true;
+
+                // schedule the post-animation cleanup
+                let sender = sender.clone();
+                glib::timeout_add_local_once(Duration::from_millis(ANIM_MS + 20), move || {
+                    sender.input(PinentryAppMsg::ExitAnimationDone);
+                });
+            }
+
+            PinentryAppMsg::ExitAnimationDone => {
+                // guard against a rapid ShowDialog that reset closing=false
+                // before this timeout fired
+                if self.closing {
+                    self.active = None;
+                    self.closing = false;
+                }
+            }
+
+            PinentryAppMsg::ServerExited => {
+                // clean up any orphaned dialog (shouldn't happen in normal
+                // flow, but is safe to handle)
+                if let Some(active) = self.active.take() {
+                    let _ = active.result_tx.0.send(DialogResult::Cancelled);
+                }
+                self.closing = false;
+                relm4::main_application().quit();
+            }
+        }
     }
-    window.add_controller(key_ctrl);
 
-    window.present();
+    fn update_view(&self, widgets: &mut Self::Widgets, sender: ComponentSender<Self>) {
+        // rebuild card content whenever a new dialog has arrived
+        if self.dialog_id != widgets.rendered_dialog_id {
+            widgets.rendered_dialog_id = self.dialog_id;
 
-    // trigger enter animation on the next main-loop iteration (after the
-    // window has been mapped and painted at least once)
-    {
-        let scrim = scrim.clone();
-        let card = card.clone();
-        glib::idle_add_local_once(move || {
-            scrim.add_css_class("visible");
-            card.add_css_class("visible");
-        });
+            // clear previous content
+            while let Some(child) = widgets.card_content.first_child() {
+                widgets.card_content.remove(&child);
+            }
+
+            if let Some(active) = &self.active {
+                build_content(&widgets.card_content, active, &sender);
+
+                // show the window and trigger the enter animation on the next
+                // main-loop tick (after the window has mapped and painted)
+                widgets.window.present();
+                let scrim = widgets.scrim.clone();
+                let card = widgets.card.clone();
+                glib::idle_add_local_once(move || {
+                    scrim.add_css_class("visible");
+                    card.add_css_class("visible");
+                });
+            }
+        }
+
+        // start the exit animation by stripping the visible classes
+        if self.closing {
+            widgets.scrim.remove_css_class("visible");
+            widgets.card.remove_css_class("visible");
+        }
+
+        // hide the window once the animation is done and no dialog is active
+        if self.active.is_none() && !self.closing {
+            widgets.window.set_visible(false);
+        }
     }
-
-    main_loop.run();
-    window.destroy();
-
-    Ok(rx.try_recv().unwrap_or(DialogResult::Cancelled))
 }
 
 // -- content builders ---------------------------------------------------------
 
-fn build_content(card: &gtk4::Box, state: &PinentryState, request: DialogRequest, ctx: Rc<Ctx>) {
-    match request {
-        DialogRequest::GetPin => build_getpin(card, state, ctx),
-        DialogRequest::Confirm { one_button: false } => build_confirm(card, state, ctx),
+/// Populates `card_content` with dialog-type-specific widgets.
+fn build_content(
+    card_content: &gtk4::Box,
+    active: &ActiveDialog,
+    sender: &ComponentSender<PinentryApp>,
+) {
+    match active.request {
+        DialogRequest::GetPin => build_getpin(card_content, &active.state, sender),
+        DialogRequest::Confirm { one_button: false } => {
+            build_confirm(card_content, &active.state, sender)
+        }
         DialogRequest::Confirm { one_button: true } | DialogRequest::Message => {
-            build_one_button(card, state, ctx);
+            build_one_button(card_content, &active.state, sender)
         }
     }
 }
 
-/// Builds the GETPIN layout: title + description + optional error + password
-/// entry + Submit/Cancel buttons.
-fn build_getpin(card: &gtk4::Box, state: &PinentryState, ctx: Rc<Ctx>) {
+/// Builds the GETPIN layout: title, description, optional error banner,
+/// password entry, and Submit / Cancel buttons.
+fn build_getpin(content: &gtk4::Box, state: &PinentryState, sender: &ComponentSender<PinentryApp>) {
     let title = gtk4::Label::builder()
         .label(state.title.as_deref().unwrap_or("Authentication required"))
         .halign(gtk4::Align::Start)
         .wrap(true)
         .build();
     title.add_css_class("title-4");
-    card.append(&title);
+    content.append(&title);
 
     let desc = gtk4::Label::builder()
         .label(
@@ -209,10 +377,10 @@ fn build_getpin(card: &gtk4::Box, state: &PinentryState, ctx: Rc<Ctx>) {
         .halign(gtk4::Align::Start)
         .wrap(true)
         .build();
-    card.append(&desc);
+    content.append(&desc);
 
     if let Some(err) = &state.error {
-        card.append(&build_error_banner(err));
+        content.append(&build_error_banner(err));
     }
 
     let entry = gtk4::PasswordEntry::builder()
@@ -222,37 +390,39 @@ fn build_getpin(card: &gtk4::Box, state: &PinentryState, ctx: Rc<Ctx>) {
 
     // Enter key inside the entry submits the passphrase
     {
-        let ctx = Rc::clone(&ctx);
+        let sender = sender.clone();
         let entry_ref = entry.clone();
         entry.connect_activate(move |_| {
-            let passphrase = entry_ref.text().to_string();
-            ctx.close(DialogResult::Pin(secrecy::SecretString::from(passphrase)));
+            let pin = SecretString::from(entry_ref.text().to_string());
+            sender.input(PinentryAppMsg::Submit(DialogResult::Pin(pin)));
         });
     }
-    card.append(&entry);
+    content.append(&entry);
 
     let btn_row = build_btn_row();
 
     let cancel_btn = gtk4::Button::with_label(state.cancel_label.as_deref().unwrap_or("Cancel"));
     {
-        let ctx = Rc::clone(&ctx);
-        cancel_btn.connect_clicked(move |_| ctx.close(DialogResult::Cancelled));
+        let sender = sender.clone();
+        cancel_btn.connect_clicked(move |_| {
+            sender.input(PinentryAppMsg::Submit(DialogResult::Cancelled));
+        });
     }
     btn_row.append(&cancel_btn);
 
     let submit_btn = gtk4::Button::with_label(state.ok_label.as_deref().unwrap_or("Submit"));
     submit_btn.add_css_class("suggested-action");
     {
-        let ctx = Rc::clone(&ctx);
-        let entry_ref = entry.clone();
+        let sender = sender.clone();
+        let entry = entry.clone();
         submit_btn.connect_clicked(move |_| {
-            let passphrase = entry_ref.text().to_string();
-            ctx.close(DialogResult::Pin(secrecy::SecretString::from(passphrase)));
+            let pin = SecretString::from(entry.text().to_string());
+            sender.input(PinentryAppMsg::Submit(DialogResult::Pin(pin)));
         });
     }
     btn_row.append(&submit_btn);
 
-    card.append(&btn_row);
+    content.append(&btn_row);
 
     // auto-focus the entry after the window maps
     glib::idle_add_local_once(move || {
@@ -260,9 +430,13 @@ fn build_getpin(card: &gtk4::Box, state: &PinentryState, ctx: Rc<Ctx>) {
     });
 }
 
-/// Builds the CONFIRM layout: description + optional error + OK / [Not OK] /
-/// Cancel buttons.
-fn build_confirm(card: &gtk4::Box, state: &PinentryState, ctx: Rc<Ctx>) {
+/// Builds the CONFIRM layout: description, optional error banner, and
+/// Cancel / [Not OK] / OK buttons.
+fn build_confirm(
+    content: &gtk4::Box,
+    state: &PinentryState,
+    sender: &ComponentSender<PinentryApp>,
+) {
     let desc = gtk4::Label::builder()
         .label(
             state
@@ -273,26 +447,30 @@ fn build_confirm(card: &gtk4::Box, state: &PinentryState, ctx: Rc<Ctx>) {
         .halign(gtk4::Align::Start)
         .wrap(true)
         .build();
-    card.append(&desc);
+    content.append(&desc);
 
     if let Some(err) = &state.error {
-        card.append(&build_error_banner(err));
+        content.append(&build_error_banner(err));
     }
 
     let btn_row = build_btn_row();
 
     let cancel_btn = gtk4::Button::with_label(state.cancel_label.as_deref().unwrap_or("Cancel"));
     {
-        let ctx = Rc::clone(&ctx);
-        cancel_btn.connect_clicked(move |_| ctx.close(DialogResult::Cancelled));
+        let sender = sender.clone();
+        cancel_btn.connect_clicked(move |_| {
+            sender.input(PinentryAppMsg::Submit(DialogResult::Cancelled));
+        });
     }
     btn_row.append(&cancel_btn);
 
     if let Some(notok_label) = &state.notok_label {
         let notok_btn = gtk4::Button::with_label(notok_label.as_str());
         {
-            let ctx = Rc::clone(&ctx);
-            notok_btn.connect_clicked(move |_| ctx.close(DialogResult::NotConfirmed));
+            let sender = sender.clone();
+            notok_btn.connect_clicked(move |_| {
+                sender.input(PinentryAppMsg::Submit(DialogResult::NotConfirmed));
+            });
         }
         btn_row.append(&notok_btn);
     }
@@ -300,31 +478,40 @@ fn build_confirm(card: &gtk4::Box, state: &PinentryState, ctx: Rc<Ctx>) {
     let ok_btn = gtk4::Button::with_label(state.ok_label.as_deref().unwrap_or("Confirm"));
     ok_btn.add_css_class("suggested-action");
     {
-        let ctx = Rc::clone(&ctx);
-        ok_btn.connect_clicked(move |_| ctx.close(DialogResult::Confirmed));
+        let sender = sender.clone();
+        ok_btn.connect_clicked(move |_| {
+            sender.input(PinentryAppMsg::Submit(DialogResult::Confirmed));
+        });
     }
     btn_row.append(&ok_btn);
 
-    card.append(&btn_row);
+    content.append(&btn_row);
 }
 
-/// Builds the one-button layout used for `CONFIRM --one-button` and `MESSAGE`.
-fn build_one_button(card: &gtk4::Box, state: &PinentryState, ctx: Rc<Ctx>) {
+/// Builds the single-button layout used for `CONFIRM --one-button` and
+/// `MESSAGE` dialogs.
+fn build_one_button(
+    content: &gtk4::Box,
+    state: &PinentryState,
+    sender: &ComponentSender<PinentryApp>,
+) {
     let desc = gtk4::Label::builder()
         .label(state.desc.as_deref().unwrap_or(""))
         .halign(gtk4::Align::Start)
         .wrap(true)
         .build();
-    card.append(&desc);
+    content.append(&desc);
 
     let ok_btn = gtk4::Button::with_label(state.ok_label.as_deref().unwrap_or("OK"));
     ok_btn.add_css_class("suggested-action");
     ok_btn.set_halign(gtk4::Align::End);
     {
-        let ctx = Rc::clone(&ctx);
-        ok_btn.connect_clicked(move |_| ctx.close(DialogResult::Confirmed));
+        let sender = sender.clone();
+        ok_btn.connect_clicked(move |_| {
+            sender.input(PinentryAppMsg::Submit(DialogResult::Confirmed));
+        });
     }
-    card.append(&ok_btn);
+    content.append(&ok_btn);
 }
 
 // -- shared helpers -----------------------------------------------------------
