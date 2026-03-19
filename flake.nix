@@ -19,9 +19,9 @@
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
 
-    musicaloft-style = {
-      url = "github:musicaloft/musicaloft-style";
-      inputs.nixpkgs.follows = "nixpkgs";
+    musicaloft-shell = {
+      url = "github:musicaloft/musicaloft-shell/devenv";
+      flake = false;
     };
 
     rust-overlay = {
@@ -32,11 +32,6 @@
     treefmt-nix = {
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
-    };
-
-    devenv-root = {
-      url = "file+file:///dev/null";
-      flake = false;
     };
   };
 
@@ -50,84 +45,18 @@
         "aarch64-darwin"
       ];
 
-      imports = [
-        # sets up code formatting and commit linting
-        inputs.musicaloft-style.flakeModule
-      ];
+      imports = [ inputs.devenv.flakeModule ];
 
       perSystem =
+        { config, ... }:
         {
-          config,
-          lib,
-          pkgs,
-          ...
-        }:
-        let
-          pname = "pinentry-cadenza";
-          buildInputs = with pkgs; [
-            gtk4
-            gtk4-layer-shell
-            libgcc
-            libxkbcommon
-            wayland
+          devenv.shells.default.imports = [
+            "${inputs.musicaloft-shell}/devenv.nix"
+            ./devenv.nix
           ];
-          nativeBuildInputs = with pkgs; [
-            autoPatchelfHook
-            pkg-config
-          ];
-          libraryPath = lib.makeLibraryPath buildInputs;
 
-          toolchain = config.devenv.shells.default.languages.rust.toolchainPackage;
-        in
-        {
-          # rust setup
-          devenv.shells.default = {
-            git-hooks.hooks.clippy = {
-              enable = true;
-              packageOverrides = {
-                cargo = toolchain;
-                clippy = toolchain;
-              };
-            };
-
-            languages.rust = {
-              enable = true;
-              mold.enable = true;
-
-              # needed for dynamic linking at runtime
-              rustflags = "-C link-args=-Wl,-fuse-ld=mold,-rpath,${libraryPath}";
-            };
-
-            packages =
-              with pkgs;
-              [
-                bacon
-                cargo-outdated
-                cargo-tarpaulin
-                pkg-config
-
-                # for testing fallback
-                pinentry-curses
-                pinentry-tty
-              ]
-              ++ buildInputs
-              ++ nativeBuildInputs;
-
-            scripts.tarp.exec = ''cargo tarpaulin --engine llvm "$@"'';
-          };
-
-          packages.default =
-            let
-              args = {
-                crateOverrides = pkgs.defaultCrateOverrides // {
-                  ${pname} = attrs: {
-                    inherit buildInputs nativeBuildInputs;
-                    runtimeDependencies = buildInputs;
-                  };
-                };
-              };
-            in
-            config.devenv.shells.default.languages.rust.import ./. args;
+          # package build
+          packages = config.devenv.shells.default.outputs;
         };
     };
 }
