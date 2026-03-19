@@ -14,19 +14,15 @@ use crate::{
 const ANIM_MS: u64 = 220;
 
 const CSS: &str = "
+window {
+    background-color: transparent;
+}
 .pinentry-scrim {
     background-color: rgba(0, 0, 0, 0.5);
     transition: opacity 220ms ease-out;
     opacity: 0;
 }
 .pinentry-scrim.visible {
-    opacity: 0.5;
-}
-.pinentry-card {
-    transition: opacity 220ms ease-out;
-    opacity: 0;
-}
-.pinentry-card.visible {
     opacity: 1;
 }
 ";
@@ -91,10 +87,8 @@ pub struct PinentryApp {
 pub struct PinentryAppWidgets {
     /// The root window (stored so `update_view` can show and hide it).
     window: gtk4::Window,
-    /// Full-screen dark overlay — holds the `.pinentry-scrim` CSS class.
+    /// Full-screen dark overlay — animated via the `.pinentry-scrim` CSS class.
     scrim: gtk4::Box,
-    /// Centered dialog card — holds the `.pinentry-card` CSS class.
-    card: gtk4::Box,
     /// Inner content area inside the card; rebuilt for each new dialog.
     card_content: gtk4::Box,
     /// Tracks which `dialog_id` has been rendered into `card_content`.
@@ -155,7 +149,6 @@ impl SimpleComponent for PinentryApp {
             .width_request(460)
             .build();
         card.add_css_class("card");
-        card.add_css_class("pinentry-card");
 
         // card_content: swappable inner area rebuilt on each ShowDialog
         let card_content = gtk4::Box::builder()
@@ -225,7 +218,6 @@ impl SimpleComponent for PinentryApp {
         let widgets = PinentryAppWidgets {
             window: root,
             scrim,
-            card,
             card_content,
             rendered_dialog_id: 0,
         };
@@ -316,18 +308,15 @@ impl SimpleComponent for PinentryApp {
                 // main-loop tick (after the window has mapped and painted)
                 widgets.window.present();
                 let scrim = widgets.scrim.clone();
-                let card = widgets.card.clone();
                 glib::idle_add_local_once(move || {
                     scrim.add_css_class("visible");
-                    card.add_css_class("visible");
                 });
             }
         }
 
-        // start the exit animation by stripping the visible classes
+        // start the exit animation by stripping the visible class
         if self.closing {
             widgets.scrim.remove_css_class("visible");
-            widgets.card.remove_css_class("visible");
         }
 
         // hide the window once the animation is done and no dialog is active
