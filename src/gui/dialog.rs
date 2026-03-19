@@ -26,18 +26,11 @@ impl fmt::Debug for ResultSender {
     }
 }
 
-#[derive(Debug)]
-pub struct ShowDialogContext {
-    state: PinentryState,
-    request: DialogRequest,
-    result_tx: ResultSender,
-}
-
 /// Messages handled by the `PinentryApp` component.
 #[derive(Debug)]
 pub enum PinentryAppMsg {
     /// The Assuan server is requesting a dialog be shown to the user.
-    ShowDialog(Box<ShowDialogContext>),
+    ShowDialog(Box<ActiveDialog>),
     /// The user has made a choice (submit, confirm, cancel).
     Submit(DialogResult),
     /// The exit animation has finished — it is safe to hide the window.
@@ -48,7 +41,8 @@ pub enum PinentryAppMsg {
 
 // -- model --------------------------------------------------------------------
 
-struct ActiveDialog {
+#[derive(Debug)]
+pub struct ActiveDialog {
     state: PinentryState,
     request: DialogRequest,
     result_tx: ResultSender,
@@ -179,7 +173,7 @@ impl SimpleComponent for PinentryApp {
                     // create a one-shot channel for this dialog's result
                     let (result_tx, result_rx) = mpsc::sync_channel(1);
 
-                    thread_sender.emit(PinentryAppMsg::ShowDialog(Box::new(ShowDialogContext {
+                    thread_sender.emit(PinentryAppMsg::ShowDialog(Box::new(ActiveDialog {
                         state: state.clone(),
                         request,
                         result_tx: ResultSender(result_tx),
@@ -216,7 +210,7 @@ impl SimpleComponent for PinentryApp {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
             PinentryAppMsg::ShowDialog(ctx) => {
-                let ShowDialogContext {
+                let ActiveDialog {
                     state,
                     request,
                     result_tx,
