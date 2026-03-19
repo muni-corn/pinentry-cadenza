@@ -3,10 +3,7 @@ use std::io::{self, BufRead, Write};
 use anyhow::Result;
 use secrecy::ExposeSecret;
 
-use crate::{
-    gui::run_dialog,
-    state::{DialogRequest, DialogResult, PinentryState},
-};
+use crate::state::{DialogRequest, DialogResult, PinentryState};
 
 // gpg-error codes used in Assuan responses
 const ERR_CANCELLED: u32 = 83886205;
@@ -149,7 +146,15 @@ pub fn write_data(w: &mut impl Write, data: &str) {
 ///
 /// Emits the Assuan greeting, then reads commands from stdin and writes
 /// responses to stdout until `BYE` is received or stdin is closed.
-pub fn server_loop(state: &mut PinentryState) -> Result<()> {
+///
+/// `show_dialog` is called whenever a dialog must be presented to the user.
+/// It receives a snapshot of the current `PinentryState` and the dialog type,
+/// and returns the user's response. This callback runs on the calling thread
+/// and blocks until the user dismisses the dialog.
+pub fn server_loop(
+    state: &mut PinentryState,
+    show_dialog: impl Fn(&PinentryState, DialogRequest) -> Result<DialogResult>,
+) -> Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let pid = std::process::id();
@@ -226,7 +231,7 @@ pub fn server_loop(state: &mut PinentryState) -> Result<()> {
                 write_ok(&mut out, "");
             }
             Command::GetPin => {
-                match run_dialog(state, DialogRequest::GetPin)? {
+                match show_dialog(state, DialogRequest::GetPin)? {
                     DialogResult::Pin(secret) => {
                         write_data(&mut out, &percent_encode(secret.expose_secret()));
                         write_ok(&mut out, "");
@@ -236,7 +241,7 @@ pub fn server_loop(state: &mut PinentryState) -> Result<()> {
                 state.reset_per_request();
             }
             Command::Confirm { one_button } => {
-                match run_dialog(state, DialogRequest::Confirm { one_button })? {
+                match show_dialog(state, DialogRequest::Confirm { one_button })? {
                     DialogResult::Confirmed => write_ok(&mut out, ""),
                     DialogResult::NotConfirmed => {
                         write_err(&mut out, ERR_NOT_CONFIRMED, "not confirmed")
@@ -247,7 +252,7 @@ pub fn server_loop(state: &mut PinentryState) -> Result<()> {
             }
             Command::Message => {
                 // message dialogs are informational — always respond OK
-                run_dialog(state, DialogRequest::Message)?;
+                show_dialog(state, DialogRequest::Message)?;
                 write_ok(&mut out, "");
                 state.reset_per_request();
             }
