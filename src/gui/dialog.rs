@@ -13,19 +13,7 @@ use crate::{
 // duration of the enter and exit CSS opacity transitions
 const ANIM_MS: u64 = 220;
 
-const CSS: &str = "
-window {
-    background-color: transparent;
-}
-.pinentry-scrim {
-    background-color: rgba(0, 0, 0, 0.5);
-    transition: opacity 220ms ease-out;
-    opacity: 0;
-}
-.pinentry-scrim.visible {
-    opacity: 1;
-}
-";
+const CSS: &str = include_str!("../style.css");
 
 // -- message types ------------------------------------------------------------
 

@@ -1,0 +1,17 @@
+window {
+  background-color: transparent;
+}
+
+.card {
+  padding: 24px;
+}
+
+.pinentry-scrim {
+  background-color: rgba(0, 0, 0, 0.5);
+  transition: opacity 220ms ease-out;
+  opacity: 0;
+}
+
+.pinentry-scrim.visible {
+  opacity: 1;
+}
