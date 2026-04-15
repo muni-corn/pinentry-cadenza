@@ -1,0 +1,5 @@
+[default.extend-identifiers]
+relm4 = "relm4"
+
+[default.extend-words]
+Relm = "Relm"
