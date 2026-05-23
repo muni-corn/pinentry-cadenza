@@ -91,7 +91,12 @@ in
           };
           ${pname} = attrs: {
             inherit buildInputs nativeBuildInputs;
-            runtimeDependencies = buildInputs;
+            runtimeDependencies =
+              buildInputs
+              ++ (with pkgs; [
+                pinentry-curses
+                pinentry-tty
+              ]);
           };
         };
       };
