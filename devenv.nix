@@ -97,6 +97,17 @@ in
                 pinentry-curses
                 pinentry-tty
               ]);
+            # make sure the fallback binaries are on PATH at runtime regardless
+            # of how the package is installed
+            postInstall = with pkgs; ''
+              wrapProgram "$out/bin/${pname}" \
+                --prefix PATH : "${
+                  lib.makeBinPath [
+                    pinentry-curses
+                    pinentry-tty
+                  ]
+                }"
+            '';
           };
         };
       };
