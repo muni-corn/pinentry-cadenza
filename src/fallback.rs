@@ -1,3 +1,38 @@
+//! Fallback detection: decides whether to exec a terminal-based pinentry.
+//!
+//! # Decision logic
+//!
+//! pinentry-cadenza is a Wayland/GTK pinentry. When the gpg-agent that spawns
+//! it is running under a graphical session but the *calling client* is an SSH
+//! session (e.g. `git push` over SSH triggering agent forwarding), we must
+//! hand off to a terminal pinentry so the password prompt appears in the
+//! caller's terminal rather than on an unreachable display.
+//!
+//! The decision is made by [`should_use_curses`] using a [`CallerContext`]
+//! that is built from three sources, in priority order:
+//!
+//! 1. **SSH env vars** inherited by the pinentry process (`SSH_CONNECTION`,
+//!    `SSH_CLIENT`, `SSH_TTY`) — set when the agent itself was started in an
+//!    SSH session.
+//! 2. **CLI arguments** (`--display`, `--ttyname`, `--ttytype`) — gpg-agent
+//!    passes these on argv when spawning pinentry, reflecting the calling
+//!    client's context at the time of the request.
+//! 3. **Process environment** (`WAYLAND_DISPLAY`, `DISPLAY`, `TERM`, `GPG_TTY`)
+//!    — baseline from the graphical session that started the agent.
+//!
+//! The check must be done **before** the assuan greeting is emitted. If we
+//! wrote the greeting first, the connected gpg-agent would be confused by a
+//! second greeting from the exec'd fallback binary.
+//!
+//! # Terminal selection
+//!
+//! When falling back, [`exec_fallback_pinentry`] selects between
+//! `pinentry-curses` and `pinentry-tty` based on [`prefers_curses`]: if
+//! `ttytype` indicates a capable terminal (anything other than `dumb`,
+//! `unknown`, or absent), `pinentry-curses` is tried first; otherwise
+//! `pinentry-tty` leads. The other binary is tried as a fallback if the
+//! preferred one is not installed.
+
 use std::env;
 
 /// Caller context used to decide whether to fall back to a terminal pinentry.
