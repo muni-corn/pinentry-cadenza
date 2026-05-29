@@ -19,7 +19,11 @@ fn main() {
     // clap handles --help and --version and exits automatically
     let args = Args::parse();
 
-    let ctx = CallerContext::from_env();
+    let ctx = CallerContext::from_args_and_env(
+        args.display.clone(),
+        args.ttyname.clone(),
+        args.ttytype.clone(),
+    );
     if fallback::should_use_curses(&ctx) {
         fallback::exec_fallback_pinentry(&raw_args, ctx.ttytype.as_deref());
     }

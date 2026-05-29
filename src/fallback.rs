@@ -13,8 +13,6 @@ pub struct CallerContext {
     /// `wayland-1`). `None` or empty string means no graphical display.
     pub display: Option<String>,
     /// Terminal device path (e.g. `/dev/pts/3`). `None` means no tty.
-    // used when threading CLI args in a later step
-    #[allow(dead_code)]
     pub ttyname: Option<String>,
     /// Terminal type string (e.g. `xterm-256color`). Used to distinguish
     /// curses-capable terminals from dumb ones.
@@ -40,6 +38,52 @@ impl CallerContext {
                 || env::var_os("SSH_CLIENT").is_some()
                 || env::var_os("SSH_TTY").is_some(),
         }
+    }
+
+    /// Overrides fields with any non-`None` values supplied via CLI arguments.
+    ///
+    /// gpg-agent passes `--display`, `--ttyname`, and `--ttytype` on the
+    /// command line when it spawns pinentry, giving the caller's context
+    /// before any assuan OPTION lines arrive. Applying these overrides makes
+    /// the fallback decision more accurate for the SSH case.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut ctx = CallerContext::from_env();
+    /// ctx.apply_args(Some("wayland-1".into()), Some("/dev/pts/3".into()), None);
+    /// ```
+    pub fn apply_args(
+        &mut self,
+        display: Option<String>,
+        ttyname: Option<String>,
+        ttytype: Option<String>,
+    ) {
+        if let Some(d) = display {
+            self.display = Some(d);
+        }
+        if let Some(t) = ttyname {
+            self.ttyname = Some(t);
+        }
+        if let Some(tt) = ttytype {
+            self.ttytype = Some(tt);
+        }
+    }
+
+    /// Builds a context from the environment and then overrides it with CLI
+    /// argument values where present.
+    ///
+    /// This is the preferred constructor for use in `main` — it seeds the
+    /// context from the inherited environment (catching SSH_* vars) and then
+    /// refines it with whatever gpg-agent passed on argv.
+    pub fn from_args_and_env(
+        display: Option<String>,
+        ttyname: Option<String>,
+        ttytype: Option<String>,
+    ) -> Self {
+        let mut ctx = Self::from_env();
+        ctx.apply_args(display, ttyname, ttytype);
+        ctx
     }
 
     /// Returns `true` if a non-empty display is present.
@@ -158,6 +202,58 @@ mod tests {
     fn empty_display_treated_as_absent() {
         let c = ctx(Some(""), Some("/dev/pts/1"), false);
         assert!(should_use_curses(&c));
+    }
+
+    #[test]
+    fn apply_args_overrides_display() {
+        let mut ctx = CallerContext::default();
+        ctx.apply_args(Some("wayland-1".into()), None, None);
+        assert_eq!(ctx.display.as_deref(), Some("wayland-1"));
+        assert!(ctx.ttyname.is_none());
+        assert!(ctx.ttytype.is_none());
+    }
+
+    #[test]
+    fn apply_args_overrides_ttyname() {
+        let mut ctx = CallerContext::default();
+        ctx.apply_args(None, Some("/dev/pts/5".into()), None);
+        assert_eq!(ctx.ttyname.as_deref(), Some("/dev/pts/5"));
+        assert!(ctx.display.is_none());
+    }
+
+    #[test]
+    fn apply_args_overrides_ttytype() {
+        let mut ctx = CallerContext::default();
+        ctx.apply_args(None, None, Some("xterm-256color".into()));
+        assert_eq!(ctx.ttytype.as_deref(), Some("xterm-256color"));
+    }
+
+    #[test]
+    fn apply_args_none_leaves_existing_values() {
+        let mut ctx = CallerContext {
+            display: Some("wayland-1".into()),
+            ttyname: Some("/dev/pts/1".into()),
+            ttytype: Some("xterm".into()),
+            ssh_session: false,
+        };
+        ctx.apply_args(None, None, None);
+        // existing values must be preserved when no override is provided
+        assert_eq!(ctx.display.as_deref(), Some("wayland-1"));
+        assert_eq!(ctx.ttyname.as_deref(), Some("/dev/pts/1"));
+        assert_eq!(ctx.ttytype.as_deref(), Some("xterm"));
+    }
+
+    #[test]
+    fn apply_args_display_overrides_env_display() {
+        // simulate an env that has WAYLAND_DISPLAY but gpg-agent passes
+        // --display "" (empty), meaning the caller has no display
+        let mut ctx = CallerContext {
+            display: Some("wayland-1".into()),
+            ..Default::default()
+        };
+        ctx.apply_args(Some(String::new()), None, None);
+        // an explicit empty display from argv should clear the display
+        assert!(!ctx.has_display());
     }
 
     #[test]
