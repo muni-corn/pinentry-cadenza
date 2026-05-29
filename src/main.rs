@@ -19,6 +19,10 @@ fn main() {
     // clap handles --help and --version and exits automatically
     let args = Args::parse();
 
+    // build caller context from env (catches SSH_* vars) then override with
+    // any display/ttyname/ttytype passed on argv by gpg-agent — this decision
+    // must happen before we emit the assuan greeting so that we can exec() the
+    // fallback binary without confusing the already-connected gpg-agent client
     let ctx = CallerContext::from_args_and_env(
         args.display.clone(),
         args.ttyname.clone(),
