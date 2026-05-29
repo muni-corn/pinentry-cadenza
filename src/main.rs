@@ -7,6 +7,7 @@ mod state;
 
 use clap::Parser as _;
 use cli::Args;
+use fallback::CallerContext;
 use gui::PinentryApp;
 use relm4::RelmApp;
 
@@ -18,8 +19,9 @@ fn main() {
     // clap handles --help and --version and exits automatically
     let args = Args::parse();
 
-    if fallback::should_use_curses() {
-        fallback::exec_pinentry_curses(&raw_args);
+    let ctx = CallerContext::from_env();
+    if fallback::should_use_curses(&ctx) {
+        fallback::exec_fallback_pinentry(&raw_args, ctx.ttytype.as_deref());
     }
 
     // prepend argv[0] as required by g_application_run, then append any
