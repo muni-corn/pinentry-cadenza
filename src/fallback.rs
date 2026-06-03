@@ -151,10 +151,7 @@ pub fn should_use_curses(ctx: &CallerContext) -> bool {
 /// Terminals identified as `dumb`, `unknown`, or absent are treated as
 /// incapable of curses rendering and should use `pinentry-tty` instead.
 pub fn prefers_curses(ttytype: Option<&str>) -> bool {
-    match ttytype {
-        None | Some("") | Some("dumb") | Some("unknown") => false,
-        Some(_) => true,
-    }
+    !matches!(ttytype, None | Some("") | Some("dumb") | Some("unknown"))
 }
 
 /// Replaces the current process with a terminal pinentry, forwarding `args`.
