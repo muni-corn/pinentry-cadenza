@@ -7,6 +7,8 @@ use std::io::{self, Write};
 pub const ERR_CANCELLED: u32 = 83886205;
 pub const ERR_NOT_CONFIRMED: u32 = 83886179;
 pub const ERR_UNKNOWN_IPC_COMMAND: u32 = 275;
+// GPG_ERR_NO_PIN_ENTRY (85) with GPG_ERR_SOURCE_PINENTRY (5) in the top byte
+pub const ERR_NO_PIN_ENTRY: u32 = 83886165;
 
 /// Parsed representation of an Assuan command.
 #[derive(Debug)]

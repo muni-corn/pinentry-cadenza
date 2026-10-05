@@ -11,7 +11,7 @@ use std::{
     thread,
 };
 
-use crate::assuan::{Handoff, StdioSession};
+use crate::assuan::{ERR_NO_PIN_ENTRY, Handoff, StdioSession, write_err};
 
 /// Hands the session over to the first terminal pinentry in `candidates` that
 /// can be started, and exits with that program's status.
@@ -40,17 +40,15 @@ where
         pending_line,
     } = handoff;
 
-    let mut child = spawn_first(candidates)?;
-    let (mut child_in, mut child_out) = take_pipes(&mut child)?;
-
-    expect_ok(&mut child_out)?;
-    for line in transcript {
-        writeln!(child_in, "{line}")?;
-        // the child's answer is discarded: gpg-agent already got ours, and
-        // options a terminal pinentry doesn't know are harmless
-        read_reply(&mut child_out)?;
-    }
-    writeln!(child_in, "{pending_line}")?;
+    let (mut child, mut child_in, mut child_out) =
+        match start(candidates, &transcript, &pending_line) {
+            Ok(started) => started,
+            Err(e) => {
+                // the agent is waiting for an answer to the pending request
+                let _ = write_err(&mut writer, ERR_NO_PIN_ENTRY, &format!("no pinentry: {e}"));
+                return Err(e);
+            }
+        };
 
     // client to child; this thread ends when the client closes the pipe, and
     // the process exits right after the child does
@@ -72,6 +70,44 @@ where
     }
 
     Ok(child.wait()?.code().unwrap_or(1))
+}
+
+/// Starts a terminal pinentry, brings it up to date, and sends it the pending
+/// request.
+fn start(
+    candidates: &[&str],
+    transcript: &[String],
+    pending_line: &str,
+) -> io::Result<(Child, ChildStdin, BufReader<ChildStdout>)> {
+    let mut child = spawn_first(candidates)?;
+    match prepare(&mut child, transcript, pending_line) {
+        Ok((child_in, child_out)) => Ok((child, child_in, child_out)),
+        Err(e) => {
+            // don't leave a half-initialized pinentry running
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(e)
+        }
+    }
+}
+
+/// Reads the greeting, replays the transcript, and sends the pending request.
+fn prepare(
+    child: &mut Child,
+    transcript: &[String],
+    pending_line: &str,
+) -> io::Result<(ChildStdin, BufReader<ChildStdout>)> {
+    let (mut child_in, mut child_out) = take_pipes(child)?;
+
+    expect_ok(&mut child_out)?;
+    for line in transcript {
+        writeln!(child_in, "{line}")?;
+        // the child's answer is discarded: gpg-agent already got ours, and
+        // options a terminal pinentry doesn't know are harmless
+        read_reply(&mut child_out)?;
+    }
+    writeln!(child_in, "{pending_line}")?;
+    Ok((child_in, child_out))
 }
 
 /// Starts the first candidate that exists, with piped stdin and stdout.
@@ -199,22 +235,30 @@ done
     }
 
     #[test]
-    fn reports_when_no_candidate_exists() {
-        let err = run(handoff("", Vec::new()), &[
+    fn answers_the_agent_when_no_candidate_exists() {
+        let shared = SharedBuf::default();
+        let err = run(handoff("", shared.clone()), &[
             "/nonexistent/a",
             "/nonexistent/b",
         ])
         .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         assert!(err.to_string().contains("/nonexistent/a"));
+        assert!(
+            shared
+                .contents()
+                .starts_with("ERR 83886165 no pinentry: none of /nonexistent/a")
+        );
     }
 
     #[test]
-    fn rejects_a_bad_greeting() {
+    fn answers_the_agent_when_the_greeting_is_bad() {
         let _guard = SCRIPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let script = install_script("cadenza-bad-greeting", "#!/bin/sh\necho 'ERR 1 nope'\n");
-        let err = run(handoff("", Vec::new()), &[script.to_str().unwrap()]).unwrap_err();
+        let shared = SharedBuf::default();
+        let err = run(handoff("", shared.clone()), &[script.to_str().unwrap()]).unwrap_err();
         assert!(err.to_string().contains("unexpected greeting"));
+        assert!(shared.contents().starts_with("ERR 83886165 "));
     }
 
     /// A cloneable writer that lets a test see what `run` wrote.
