@@ -2,6 +2,8 @@
 
 use std::env;
 
+use super::user_data::{TerminalHint, parse_terminal_hint};
+
 /// Caller context used to decide whether to fall back to a terminal pinentry.
 ///
 /// All fields are sourced from the pinentry's launch environment, CLI flags,
@@ -27,6 +29,8 @@ pub struct CallerContext {
     /// come from a terminal caller when the agent itself runs in a graphical
     /// session.
     pub session_type: Option<String>,
+    /// Terminal pinentry requested through `PINENTRY_USER_DATA`.
+    pub terminal_hint: Option<TerminalHint>,
 }
 
 impl CallerContext {
@@ -46,6 +50,9 @@ impl CallerContext {
                 || env::var_os("SSH_CLIENT").is_some()
                 || env::var_os("SSH_TTY").is_some(),
             session_type: env::var("XDG_SESSION_TYPE").ok().filter(|s| !s.is_empty()),
+            terminal_hint: env::var("PINENTRY_USER_DATA")
+                .ok()
+                .and_then(|v| parse_terminal_hint(&v)),
         }
     }
 

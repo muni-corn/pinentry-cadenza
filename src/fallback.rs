@@ -41,6 +41,7 @@
 
 mod context;
 mod exec;
+mod user_data;
 
 pub use context::CallerContext;
 pub use exec::exec_fallback_pinentry;
@@ -51,6 +52,11 @@ pub use exec::exec_fallback_pinentry;
 /// the process environment directly, so it can be called after CLI args or
 /// assuan OPTION lines have been applied to refine the picture of the caller.
 pub fn should_use_curses(ctx: &CallerContext) -> bool {
+    // the caller explicitly asked for a terminal pinentry
+    if ctx.terminal_hint.is_some() {
+        return true;
+    }
+
     // explicit ssh session marker in the inherited environment
     if ctx.ssh_session {
         return true;
@@ -71,7 +77,7 @@ pub fn should_use_curses(ctx: &CallerContext) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{user_data::TerminalHint, *};
 
     // helper to build a minimal context for testing
     fn ctx(display: Option<&str>, ttyname: Option<&str>, ssh_session: bool) -> CallerContext {
@@ -81,6 +87,7 @@ mod tests {
             ttytype: None,
             ssh_session,
             session_type: None,
+            terminal_hint: None,
         }
     }
 
@@ -111,6 +118,15 @@ mod tests {
     #[test]
     fn ssh_session_always_uses_curses() {
         let c = ctx(Some("wayland-1"), Some("/dev/pts/1"), true);
+        assert!(should_use_curses(&c));
+    }
+
+    #[test]
+    fn terminal_hint_overrides_a_graphical_context() {
+        let c = CallerContext {
+            terminal_hint: Some(TerminalHint::Tty),
+            ..ctx(Some("wayland-1"), Some("/dev/pts/1"), false)
+        };
         assert!(should_use_curses(&c));
     }
 
