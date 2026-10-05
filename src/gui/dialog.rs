@@ -4,9 +4,9 @@ use gtk4::{gdk, glib, prelude::*};
 use gtk4_layer_shell::LayerShell;
 use relm4::prelude::*;
 
-use super::content;
+use super::{bridge, content};
 use crate::{
-    assuan, sound,
+    sound,
     state::{DialogRequest, DialogResult, PinentryState},
 };
 
@@ -46,6 +46,23 @@ pub struct ActiveDialog {
     state: PinentryState,
     request: DialogRequest,
     result_tx: ResultSender,
+}
+
+impl ActiveDialog {
+    /// Creates a dialog together with the receiver that yields its result.
+    pub(super) fn new(
+        state: PinentryState,
+        request: DialogRequest,
+    ) -> (Self, mpsc::Receiver<DialogResult>) {
+        // one-shot channel for this dialog's result
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let dialog = Self {
+            state,
+            request,
+            result_tx: ResultSender(result_tx),
+        };
+        (dialog, result_rx)
+    }
 }
 
 /// Root Relm4 component for the pinentry application.
@@ -163,18 +180,7 @@ impl SimpleComponent for PinentryApp {
         }
         root.add_controller(key_ctrl);
 
-        // spawn the Assuan server on a background thread so it can block on
-        // stdin without freezing the GTK event loop
-        {
-            let thread_sender = sender.input_sender().clone();
-            std::thread::spawn(move || {
-                if let Err(e) = run_session(&thread_sender) {
-                    eprintln!("server loop failed: {e}");
-                }
-
-                thread_sender.emit(PinentryAppMsg::ServerExited);
-            });
-        }
+        bridge::spawn(sender.input_sender().clone());
 
         let model = PinentryApp {
             active: None,
@@ -296,30 +302,4 @@ impl SimpleComponent for PinentryApp {
             widgets.window.set_visible(false);
         }
     }
-}
-
-// -- assuan driver ------------------------------------------------------------
-
-/// Serves the Assuan session on stdin and stdout, showing each requested
-/// dialog on the GTK thread and blocking until it is answered.
-fn run_session(sender: &relm4::Sender<PinentryAppMsg>) -> anyhow::Result<()> {
-    let mut session =
-        assuan::Session::new(std::io::BufReader::new(std::io::stdin()), std::io::stdout());
-    session.greet()?;
-
-    while let assuan::Step::Dialog(request) = session.next_dialog()? {
-        // create a one-shot channel for this dialog's result
-        let (result_tx, result_rx) = mpsc::sync_channel(1);
-
-        sender.emit(PinentryAppMsg::ShowDialog(Box::new(ActiveDialog {
-            state: session.state().clone(),
-            request,
-            result_tx: ResultSender(result_tx),
-        })));
-
-        // block until the GTK thread delivers the user's response
-        let result = result_rx.recv().unwrap_or(DialogResult::Cancelled);
-        session.respond(result)?;
-    }
-    Ok(())
 }
