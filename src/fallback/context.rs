@@ -21,6 +21,12 @@ pub struct CallerContext {
     pub ttytype: Option<String>,
     /// Whether an SSH session was detected in the launch environment.
     pub ssh_session: bool,
+    /// Session type (e.g. `wayland` or `tty`) from `XDG_SESSION_TYPE`.
+    ///
+    /// gpg-agent forwards this variable from its client, so `tty` can only
+    /// come from a terminal caller when the agent itself runs in a graphical
+    /// session.
+    pub session_type: Option<String>,
 }
 
 impl CallerContext {
@@ -39,6 +45,7 @@ impl CallerContext {
             ssh_session: env::var_os("SSH_CONNECTION").is_some()
                 || env::var_os("SSH_CLIENT").is_some()
                 || env::var_os("SSH_TTY").is_some(),
+            session_type: env::var("XDG_SESSION_TYPE").ok().filter(|s| !s.is_empty()),
         }
     }
 
@@ -88,6 +95,11 @@ impl CallerContext {
         ctx
     }
 
+    /// Returns `true` if the session type is `tty`.
+    pub fn is_tty_session(&self) -> bool {
+        self.session_type.as_deref() == Some("tty")
+    }
+
     /// Returns `true` if a non-empty display is present.
     pub fn has_display(&self) -> bool {
         self.display.as_deref().is_some_and(|d| !d.is_empty())
@@ -128,7 +140,7 @@ mod tests {
             display: Some("wayland-1".into()),
             ttyname: Some("/dev/pts/1".into()),
             ttytype: Some("xterm".into()),
-            ssh_session: false,
+            ..Default::default()
         };
         ctx.apply_args(None, None, None);
         // existing values must be preserved when no override is provided

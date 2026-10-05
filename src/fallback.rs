@@ -17,10 +17,12 @@
 //! 2. **CLI arguments** (`--display`, `--ttyname`, `--ttytype`). gpg-agent 2.4
 //!    only passes `--display`, and only when the caller has `DISPLAY` set; the
 //!    tty options are honored for manual invocation.
-//! 3. **Process environment** (`WAYLAND_DISPLAY`, `DISPLAY`, `TERM`, `GPG_TTY`)
-//!    — inherited from gpg-agent itself, with caller values layered on top.
-//!    Caller variables that are unset are *not* removed, so an SSH caller still
-//!    sees the agent's graphical environment.
+//! 3. **Process environment** (`WAYLAND_DISPLAY`, `DISPLAY`, `TERM`, `GPG_TTY`,
+//!    `XDG_SESSION_TYPE`) — inherited from gpg-agent itself, with caller values
+//!    layered on top. Caller variables that are unset are *not* removed, so an
+//!    SSH caller still sees the agent's graphical environment.
+//!    `XDG_SESSION_TYPE=tty` is the exception: it is forwarded by the caller,
+//!    so it reliably marks a terminal caller.
 //!
 //! See `docs/notes/gpg-agent-caller-context.md` for the full details.
 //!
@@ -54,6 +56,11 @@ pub fn should_use_curses(ctx: &CallerContext) -> bool {
         return true;
     }
 
+    // a tty session type can only have been supplied by a terminal caller
+    if ctx.is_tty_session() {
+        return true;
+    }
+
     // caller has no graphical display — must use terminal
     if !ctx.has_display() {
         return true;
@@ -73,6 +80,7 @@ mod tests {
             ttyname: ttyname.map(str::to_owned),
             ttytype: None,
             ssh_session,
+            session_type: None,
         }
     }
 
@@ -104,6 +112,24 @@ mod tests {
     fn ssh_session_always_uses_curses() {
         let c = ctx(Some("wayland-1"), Some("/dev/pts/1"), true);
         assert!(should_use_curses(&c));
+    }
+
+    #[test]
+    fn tty_session_type_uses_curses_despite_inherited_display() {
+        let c = CallerContext {
+            session_type: Some("tty".into()),
+            ..ctx(Some("wayland-1"), None, false)
+        };
+        assert!(should_use_curses(&c));
+    }
+
+    #[test]
+    fn graphical_session_type_prefers_gui() {
+        let c = CallerContext {
+            session_type: Some("wayland".into()),
+            ..ctx(Some("wayland-1"), None, false)
+        };
+        assert!(!should_use_curses(&c));
     }
 
     #[test]
