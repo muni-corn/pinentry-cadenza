@@ -1,146 +1,15 @@
+mod protocol;
+
 use std::io::{self, BufRead, Write};
 
 use anyhow::Result;
+use protocol::{
+    Command, ERR_CANCELLED, ERR_NOT_CONFIRMED, ERR_UNKNOWN_IPC_COMMAND, parse_command,
+    percent_encode, write_data, write_err, write_ok,
+};
 use secrecy::ExposeSecret;
 
 use crate::state::{DialogRequest, DialogResult, PinentryState};
-
-// gpg-error codes used in Assuan responses
-const ERR_CANCELLED: u32 = 83886205;
-const ERR_NOT_CONFIRMED: u32 = 83886179;
-const ERR_UNKNOWN_IPC_COMMAND: u32 = 275;
-
-/// Parsed representation of an Assuan command.
-#[derive(Debug)]
-pub enum Command {
-    SetDesc(String),
-    SetPrompt(String),
-    SetTitle(String),
-    SetOk(String),
-    SetCancel(String),
-    SetNotOk(String),
-    SetError(String),
-    SetTimeout(u32),
-    SetKeyInfo(String),
-    SetRepeat(String),
-    SetRepeatError(String),
-    /// `SETQUALITYBAR` with an optional custom label; `None` means use the
-    /// default.
-    SetQualityBar(Option<String>),
-    SetQualityBarTooltip(String),
-    GetPin,
-    Confirm {
-        #[allow(dead_code)]
-        one_button: bool,
-    },
-    Message,
-    GetInfo(String),
-    /// `OPTION key [value]` — a client configuration key-value pair.
-    // note: named Option to match the Assuan keyword; does not shadow std::option::Option
-    Option(String, Option<String>),
-    Reset,
-    Bye,
-    Nop,
-    Unknown(String),
-}
-
-/// Parses a single Assuan command line into a `Command`.
-pub fn parse_command(line: &str) -> Command {
-    let (keyword, rest) = split_first_word(line);
-    match keyword.to_ascii_uppercase().as_str() {
-        "SETDESC" => Command::SetDesc(percent_decode(rest)),
-        "SETPROMPT" => Command::SetPrompt(percent_decode(rest)),
-        "SETTITLE" => Command::SetTitle(percent_decode(rest)),
-        "SETOK" => Command::SetOk(percent_decode(rest)),
-        "SETCANCEL" => Command::SetCancel(percent_decode(rest)),
-        "SETNOTOK" => Command::SetNotOk(percent_decode(rest)),
-        "SETERROR" => Command::SetError(percent_decode(rest)),
-        "SETTIMEOUT" => Command::SetTimeout(rest.parse().unwrap_or(0)),
-        "SETKEYINFO" => Command::SetKeyInfo(percent_decode(rest)),
-        "SETREPEAT" => Command::SetRepeat(percent_decode(rest)),
-        "SETREPEATERROR" => Command::SetRepeatError(percent_decode(rest)),
-        "SETQUALITYBAR" => {
-            if rest.is_empty() {
-                Command::SetQualityBar(None)
-            } else {
-                Command::SetQualityBar(Some(percent_decode(rest)))
-            }
-        }
-        "SETQUALITYBAR_TT" => Command::SetQualityBarTooltip(percent_decode(rest)),
-        "GETPIN" => Command::GetPin,
-        "CONFIRM" => Command::Confirm {
-            one_button: rest.contains("--one-button"),
-        },
-        "MESSAGE" => Command::Message,
-        "GETINFO" => Command::GetInfo(rest.to_string()),
-        "OPTION" => parse_option(rest),
-        "RESET" => Command::Reset,
-        "BYE" => Command::Bye,
-        "NOP" => Command::Nop,
-        _ => Command::Unknown(keyword.to_string()),
-    }
-}
-
-/// Decodes a percent-encoded Assuan string (`%XX` sequences) to a `String`.
-pub fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hi = char::from(bytes[i + 1]).to_digit(16);
-            let lo = char::from(bytes[i + 2]).to_digit(16);
-            if let (Some(hi), Some(lo)) = (hi, lo) {
-                result.push((hi * 16 + lo) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        result.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&result).into_owned()
-}
-
-/// Percent-encodes a string for use in an Assuan response.
-///
-/// Encodes `%`, newlines, carriage returns, and other ASCII control characters.
-#[allow(dead_code)]
-pub fn percent_encode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'%' => result.push_str("%25"),
-            b'\n' => result.push_str("%0A"),
-            b'\r' => result.push_str("%0D"),
-            b if b < 0x20 || b == 0x7f => result.push_str(&format!("%{b:02X}")),
-            _ => result.push(byte as char),
-        }
-    }
-    result
-}
-
-/// Writes `OK [msg]` to `w` and flushes.
-pub fn write_ok(w: &mut impl Write, msg: &str) -> io::Result<()> {
-    if msg.is_empty() {
-        writeln!(w, "OK")?;
-    } else {
-        writeln!(w, "OK {msg}")?;
-    }
-    w.flush()
-}
-
-/// Writes `ERR <code> <msg>` to `w` and flushes.
-pub fn write_err(w: &mut impl Write, code: u32, msg: &str) -> io::Result<()> {
-    writeln!(w, "ERR {code} {msg}")?;
-    w.flush()
-}
-
-/// Writes `D <data>` to `w` and flushes.
-pub fn write_data(w: &mut impl Write, data: &str) -> io::Result<()> {
-    writeln!(w, "D {data}")?;
-    w.flush()
-}
 
 /// Runs the Assuan server loop.
 ///
@@ -284,35 +153,6 @@ pub fn server_loop(
         }
     }
     Ok(())
-}
-
-/// Splits a trimmed line into its first word and the remainder.
-fn split_first_word(s: &str) -> (&str, &str) {
-    if let Some(pos) = s.find(char::is_whitespace) {
-        (&s[..pos], s[pos + 1..].trim_start())
-    } else {
-        (s, "")
-    }
-}
-
-/// Parses the argument to an `OPTION` command into `Command::Option(key,
-/// value)`.
-///
-/// Accepts `key=value`, `key value`, and bare `key` forms.
-fn parse_option(arg: &str) -> Command {
-    if let Some(eq) = arg.find('=') {
-        let key = arg[..eq].trim().to_string();
-        let value = arg[eq + 1..].to_string();
-        let value = if value.is_empty() { None } else { Some(value) };
-        Command::Option(key, value)
-    } else if let Some(sp) = arg.find(char::is_whitespace) {
-        let key = arg[..sp].trim().to_string();
-        let value = arg[sp + 1..].trim().to_string();
-        let value = if value.is_empty() { None } else { Some(value) };
-        Command::Option(key, value)
-    } else {
-        Command::Option(arg.to_string(), None)
-    }
 }
 
 /// Handles a `GETINFO` command, writing the response to `out`.
