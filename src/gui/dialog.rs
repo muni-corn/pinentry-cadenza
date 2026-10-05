@@ -4,7 +4,7 @@ use gtk4::{gdk, glib, prelude::*};
 use gtk4_layer_shell::LayerShell;
 use relm4::prelude::*;
 
-use super::{bridge, content};
+use super::{Startup, bridge, content};
 use crate::{
     sound,
     state::{DialogRequest, DialogResult, PinentryState},
@@ -97,7 +97,7 @@ pub struct PinentryAppWidgets {
 // -- component implementation -------------------------------------------------
 
 impl SimpleComponent for PinentryApp {
-    type Init = ();
+    type Init = Startup;
     type Input = PinentryAppMsg;
     type Output = ();
     type Root = gtk4::Window;
@@ -111,7 +111,7 @@ impl SimpleComponent for PinentryApp {
     }
 
     fn init(
-        _init: Self::Init,
+        startup: Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
@@ -180,7 +180,7 @@ impl SimpleComponent for PinentryApp {
         }
         root.add_controller(key_ctrl);
 
-        bridge::spawn(sender.input_sender().clone());
+        bridge::spawn(sender.input_sender().clone(), startup);
 
         let model = PinentryApp {
             active: None,

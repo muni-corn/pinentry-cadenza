@@ -1,6 +1,6 @@
 //! A pinentry-side Assuan session over an arbitrary reader and writer.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, BufReader, Stdin, Stdout, Write};
 
 use anyhow::Result;
 use secrecy::ExposeSecret;
@@ -34,6 +34,13 @@ pub struct Session<R, W> {
     writer: W,
     state: PinentryState,
     pending: Option<DialogRequest>,
+}
+
+impl Session<BufReader<Stdin>, Stdout> {
+    /// Creates a session that talks to gpg-agent over stdin and stdout.
+    pub fn stdio() -> Self {
+        Self::new(BufReader::new(io::stdin()), io::stdout())
+    }
 }
 
 impl<R: BufRead, W: Write> Session<R, W> {
