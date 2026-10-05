@@ -12,13 +12,17 @@
 //! that is built from three sources, in priority order:
 //!
 //! 1. **SSH env vars** inherited by the pinentry process (`SSH_CONNECTION`,
-//!    `SSH_CLIENT`, `SSH_TTY`) — set when the agent itself was started in an
-//!    SSH session.
-//! 2. **CLI arguments** (`--display`, `--ttyname`, `--ttytype`) — gpg-agent
-//!    passes these on argv when spawning pinentry, reflecting the calling
-//!    client's context at the time of the request.
+//!    `SSH_CLIENT`, `SSH_TTY`) — only present if the agent itself was started
+//!    in an SSH session. gpg-agent never forwards these from its clients.
+//! 2. **CLI arguments** (`--display`, `--ttyname`, `--ttytype`). gpg-agent 2.4
+//!    only passes `--display`, and only when the caller has `DISPLAY` set; the
+//!    tty options are honored for manual invocation.
 //! 3. **Process environment** (`WAYLAND_DISPLAY`, `DISPLAY`, `TERM`, `GPG_TTY`)
-//!    — baseline from the graphical session that started the agent.
+//!    — inherited from gpg-agent itself, with caller values layered on top.
+//!    Caller variables that are unset are *not* removed, so an SSH caller still
+//!    sees the agent's graphical environment.
+//!
+//! See `docs/notes/gpg-agent-caller-context.md` for the full details.
 //!
 //! The check must be done **before** the assuan greeting is emitted. If we
 //! wrote the greeting first, the connected gpg-agent would be confused by a
@@ -77,10 +81,9 @@ impl CallerContext {
 
     /// Overrides fields with any non-`None` values supplied via CLI arguments.
     ///
-    /// gpg-agent passes `--display`, `--ttyname`, and `--ttytype` on the
-    /// command line when it spawns pinentry, giving the caller's context
-    /// before any assuan OPTION lines arrive. Applying these overrides makes
-    /// the fallback decision more accurate for the SSH case.
+    /// gpg-agent 2.4 passes only `--display` on the command line (and only
+    /// when the caller has `DISPLAY` set). `--ttyname` and `--ttytype` are
+    /// never passed by gpg-agent; they are honored here for manual use.
     ///
     /// # Examples
     ///
@@ -109,8 +112,9 @@ impl CallerContext {
     /// argument values where present.
     ///
     /// This is the preferred constructor for use in `main` — it seeds the
-    /// context from the inherited environment (catching SSH_* vars) and then
-    /// refines it with whatever gpg-agent passed on argv.
+    /// context from the inherited environment (catching SSH_* vars if the
+    /// agent itself runs in an SSH session) and then refines it with whatever
+    /// was passed on argv.
     pub fn from_args_and_env(
         display: Option<String>,
         ttyname: Option<String>,
