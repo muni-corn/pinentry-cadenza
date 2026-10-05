@@ -7,6 +7,8 @@ use std::fs;
 pub struct CallerEnv {
     /// The caller was started from an SSH session.
     pub ssh_session: bool,
+    /// The caller has a non-empty `WAYLAND_DISPLAY` or `DISPLAY`.
+    pub has_display: bool,
 }
 
 impl CallerEnv {
@@ -27,8 +29,11 @@ impl CallerEnv {
             let Some(eq) = entry.iter().position(|&b| b == b'=') else {
                 continue;
             };
-            if matches!(&entry[..eq], b"SSH_CONNECTION" | b"SSH_CLIENT" | b"SSH_TTY") {
-                env.ssh_session = true;
+            let (name, value) = (&entry[..eq], &entry[eq + 1..]);
+            match name {
+                b"SSH_CONNECTION" | b"SSH_CLIENT" | b"SSH_TTY" => env.ssh_session = true,
+                b"WAYLAND_DISPLAY" | b"DISPLAY" if !value.is_empty() => env.has_display = true,
+                _ => {}
             }
         }
         env
@@ -51,6 +56,20 @@ mod tests {
     fn local_environment_is_not_ssh() {
         let raw = b"HOME=/home/muni\0WAYLAND_DISPLAY=wayland-1\0";
         assert!(!CallerEnv::from_environ(raw).ssh_session);
+    }
+
+    #[test]
+    fn detects_a_display() {
+        for var in ["WAYLAND_DISPLAY=wayland-1", "DISPLAY=:0"] {
+            let raw = format!("HOME=/home/muni\0{var}\0");
+            assert!(CallerEnv::from_environ(raw.as_bytes()).has_display);
+        }
+    }
+
+    #[test]
+    fn empty_display_does_not_count() {
+        let raw = b"DISPLAY=\0WAYLAND_DISPLAY=\0";
+        assert!(!CallerEnv::from_environ(raw).has_display);
     }
 
     #[test]

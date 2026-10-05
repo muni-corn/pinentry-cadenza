@@ -83,10 +83,14 @@ pub fn should_use_curses(ctx: &CallerContext) -> bool {
 /// Returns `true` if a session that is already in progress should be handed
 /// to a terminal pinentry, judging by the caller's real environment.
 ///
+/// `ttyname` is the terminal the caller reported with `OPTION ttyname`. A
+/// caller that has a terminal but no display can only be prompted there.
+///
 /// This is the counterpart of [`should_use_curses`] for after the assuan
 /// greeting, when `exec()` is no longer possible.
-pub fn should_hand_off(caller: &CallerEnv) -> bool {
-    caller.ssh_session
+pub fn should_hand_off(caller: &CallerEnv, ttyname: Option<&str>) -> bool {
+    let has_tty = ttyname.is_some_and(|t| !t.is_empty());
+    caller.ssh_session || (!caller.has_display && has_tty)
 }
 
 #[cfg(test)]
@@ -168,13 +172,34 @@ mod tests {
         assert!(should_use_curses(&c));
     }
 
-    #[test]
-    fn ssh_callers_are_handed_off() {
-        assert!(should_hand_off(&CallerEnv { ssh_session: true }));
+    fn caller(ssh_session: bool, has_display: bool) -> CallerEnv {
+        CallerEnv {
+            ssh_session,
+            has_display,
+        }
     }
 
     #[test]
-    fn local_callers_keep_the_gui() {
-        assert!(!should_hand_off(&CallerEnv::default()));
+    fn ssh_callers_are_handed_off_with_or_without_a_tty() {
+        assert!(should_hand_off(&caller(true, false), None));
+        assert!(should_hand_off(&caller(true, false), Some("/dev/pts/1")));
+        assert!(should_hand_off(&caller(true, true), None));
+    }
+
+    #[test]
+    fn callers_with_a_tty_but_no_display_are_handed_off() {
+        assert!(should_hand_off(&caller(false, false), Some("/dev/pts/1")));
+    }
+
+    #[test]
+    fn callers_with_a_display_keep_the_gui() {
+        assert!(!should_hand_off(&caller(false, true), None));
+        assert!(!should_hand_off(&caller(false, true), Some("/dev/pts/1")));
+    }
+
+    #[test]
+    fn callers_with_neither_display_nor_tty_keep_the_gui() {
+        assert!(!should_hand_off(&caller(false, false), None));
+        assert!(!should_hand_off(&caller(false, false), Some("")));
     }
 }

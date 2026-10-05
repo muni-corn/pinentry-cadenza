@@ -50,7 +50,7 @@ fn main() {
     // can't exec() a terminal pinentry; hand the session over instead
     if let Some(owner) = session.state().owner.as_ref()
         && let Some(caller) = CallerEnv::from_pid(owner.pid)
-        && fallback::should_hand_off(&caller)
+        && fallback::should_hand_off(&caller, session.state().ttyname.as_deref())
     {
         let ttytype = session
             .state()
