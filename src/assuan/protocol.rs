@@ -168,3 +168,124 @@ fn parse_option(arg: &str) -> Command {
         Command::Option(arg.to_string(), None)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_set_commands_with_percent_decoding() {
+        let Command::SetDesc(s) = parse_command("SETDESC Enter%0Apassphrase") else {
+            panic!("expected SetDesc");
+        };
+        assert_eq!(s, "Enter\npassphrase");
+    }
+
+    #[test]
+    fn keyword_is_case_insensitive() {
+        assert!(matches!(parse_command("getpin"), Command::GetPin));
+        assert!(matches!(parse_command("Bye"), Command::Bye));
+    }
+
+    #[test]
+    fn parses_timeout_and_falls_back_to_zero() {
+        assert!(matches!(
+            parse_command("SETTIMEOUT 30"),
+            Command::SetTimeout(30)
+        ));
+        assert!(matches!(
+            parse_command("SETTIMEOUT soon"),
+            Command::SetTimeout(0)
+        ));
+    }
+
+    #[test]
+    fn quality_bar_label_is_optional() {
+        assert!(matches!(
+            parse_command("SETQUALITYBAR"),
+            Command::SetQualityBar(None)
+        ));
+        let Command::SetQualityBar(Some(label)) = parse_command("SETQUALITYBAR Strength") else {
+            panic!("expected a label");
+        };
+        assert_eq!(label, "Strength");
+    }
+
+    #[test]
+    fn confirm_detects_one_button() {
+        assert!(matches!(
+            parse_command("CONFIRM --one-button"),
+            Command::Confirm { one_button: true }
+        ));
+        assert!(matches!(parse_command("CONFIRM"), Command::Confirm {
+            one_button: false
+        }));
+    }
+
+    #[test]
+    fn unknown_keyword_is_reported() {
+        let Command::Unknown(k) = parse_command("FROBNICATE now") else {
+            panic!("expected Unknown");
+        };
+        assert_eq!(k, "FROBNICATE");
+    }
+
+    #[test]
+    fn option_accepts_equals_space_and_bare_forms() {
+        let Command::Option(k, v) = parse_command("OPTION ttyname=/dev/pts/3") else {
+            panic!("expected Option");
+        };
+        assert_eq!((k.as_str(), v.as_deref()), ("ttyname", Some("/dev/pts/3")));
+
+        let Command::Option(k, v) = parse_command("OPTION owner 123/1000 host") else {
+            panic!("expected Option");
+        };
+        assert_eq!((k.as_str(), v.as_deref()), ("owner", Some("123/1000 host")));
+
+        let Command::Option(k, v) = parse_command("OPTION grab") else {
+            panic!("expected Option");
+        };
+        assert_eq!((k.as_str(), v), ("grab", None));
+    }
+
+    #[test]
+    fn option_with_empty_value_has_no_value() {
+        let Command::Option(k, v) = parse_command("OPTION ttytype=") else {
+            panic!("expected Option");
+        };
+        assert_eq!((k.as_str(), v), ("ttytype", None));
+    }
+
+    #[test]
+    fn percent_decode_handles_escapes_and_malformed_input() {
+        assert_eq!(percent_decode("a%41b"), "aAb");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("%41"), "A");
+    }
+
+    #[test]
+    fn percent_encode_escapes_control_characters() {
+        assert_eq!(percent_encode("50%\r\n"), "50%25%0D%0A");
+        assert_eq!(percent_encode("a\u{1}b"), "a%01b");
+    }
+
+    #[test]
+    fn percent_round_trips() {
+        let original = "pass%word\nwith\tstuff";
+        assert_eq!(percent_decode(&percent_encode(original)), original);
+    }
+
+    #[test]
+    fn writers_emit_assuan_lines() {
+        let mut buf = Vec::new();
+        write_ok(&mut buf, "").unwrap();
+        write_ok(&mut buf, "closing connection").unwrap();
+        write_data(&mut buf, "secret").unwrap();
+        write_err(&mut buf, 99, "nope").unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "OK\nOK closing connection\nD secret\nERR 99 nope\n"
+        );
+    }
+}
