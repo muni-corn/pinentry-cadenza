@@ -30,7 +30,7 @@ fn main() {
         args.ttytype.clone(),
     );
     if fallback::should_use_curses(&ctx) {
-        fallback::exec_fallback_pinentry(&raw_args, ctx.ttytype.as_deref());
+        fallback::exec_fallback_pinentry(&raw_args, ctx.ttytype.as_deref(), ctx.terminal_hint);
     }
 
     // serve the assuan preamble before starting gtk: if the client never asks

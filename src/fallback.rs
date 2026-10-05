@@ -37,7 +37,8 @@
 //! `ttytype` indicates a capable terminal (anything other than `dumb`,
 //! `unknown`, or absent), `pinentry-curses` is tried first; otherwise
 //! `pinentry-tty` leads. The other binary is tried as a fallback if the
-//! preferred one is not installed.
+//! preferred one is not installed. A `USE_TTY=1` or `USE_CURSES=1` hint in
+//! `PINENTRY_USER_DATA` overrides the terminal type check.
 
 mod context;
 mod exec;
