@@ -168,22 +168,7 @@ impl SimpleComponent for PinentryApp {
         {
             let thread_sender = sender.input_sender().clone();
             std::thread::spawn(move || {
-                let mut state = PinentryState::default();
-                let result = assuan::server_loop(&mut state, |state, request| {
-                    // create a one-shot channel for this dialog's result
-                    let (result_tx, result_rx) = mpsc::sync_channel(1);
-
-                    thread_sender.emit(PinentryAppMsg::ShowDialog(Box::new(ActiveDialog {
-                        state: state.clone(),
-                        request,
-                        result_tx: ResultSender(result_tx),
-                    })));
-
-                    // block until the GTK thread delivers the user's response
-                    Ok(result_rx.recv().unwrap_or(DialogResult::Cancelled))
-                });
-
-                if let Err(e) = result {
+                if let Err(e) = run_session(&thread_sender) {
                     eprintln!("server loop failed: {e}");
                 }
 
@@ -311,4 +296,30 @@ impl SimpleComponent for PinentryApp {
             widgets.window.set_visible(false);
         }
     }
+}
+
+// -- assuan driver ------------------------------------------------------------
+
+/// Serves the Assuan session on stdin and stdout, showing each requested
+/// dialog on the GTK thread and blocking until it is answered.
+fn run_session(sender: &relm4::Sender<PinentryAppMsg>) -> anyhow::Result<()> {
+    let mut session =
+        assuan::Session::new(std::io::BufReader::new(std::io::stdin()), std::io::stdout());
+    session.greet()?;
+
+    while let assuan::Step::Dialog(request) = session.next_dialog()? {
+        // create a one-shot channel for this dialog's result
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+
+        sender.emit(PinentryAppMsg::ShowDialog(Box::new(ActiveDialog {
+            state: session.state().clone(),
+            request,
+            result_tx: ResultSender(result_tx),
+        })));
+
+        // block until the GTK thread delivers the user's response
+        let result = result_rx.recv().unwrap_or(DialogResult::Cancelled);
+        session.respond(result)?;
+    }
+    Ok(())
 }
