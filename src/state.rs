@@ -1,5 +1,9 @@
 use secrecy::SecretString;
 
+mod owner;
+
+pub use owner::Owner;
+
 /// Accumulated state from Assuan SET* commands and OPTION configuration.
 #[derive(Debug, Default, Clone)]
 pub struct PinentryState {
@@ -28,6 +32,8 @@ pub struct PinentryState {
     pub grab: bool,
     pub invisible_char: Option<char>,
     pub formatted_passphrase: bool,
+    /// The client that triggered the request, from `OPTION owner`.
+    pub owner: Option<Owner>,
 }
 
 impl PinentryState {

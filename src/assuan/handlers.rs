@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 
 use super::protocol::{ERR_UNKNOWN_IPC_COMMAND, write_data, write_err, write_ok};
-use crate::state::PinentryState;
+use crate::state::{Owner, PinentryState};
 
 /// Handles a `GETINFO` command, writing the response to `out`.
 pub(super) fn dispatch_getinfo(
@@ -56,7 +56,37 @@ pub(super) fn apply_option(state: &mut PinentryState, key: &str, value: Option<S
         "no-grab" => state.grab = false,
         "invisible-char" => state.invisible_char = value.and_then(|s| s.chars().next()),
         "formatted-passphrase" => state.formatted_passphrase = true,
+        "owner" => state.owner = value.as_deref().and_then(Owner::parse),
         // all other options are accepted without effect
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_option_is_stored() {
+        let mut state = PinentryState::default();
+        apply_option(&mut state, "owner", Some("77/1001 cherri".into()));
+        let owner = state.owner.unwrap();
+        assert_eq!((owner.pid, owner.uid), (77, 1001));
+    }
+
+    #[test]
+    fn malformed_owner_clears_the_previous_value() {
+        let mut state = PinentryState::default();
+        apply_option(&mut state, "owner", Some("77/1001 cherri".into()));
+        apply_option(&mut state, "owner", Some("junk".into()));
+        assert!(state.owner.is_none());
+    }
+
+    #[test]
+    fn owner_survives_reset() {
+        let mut state = PinentryState::default();
+        apply_option(&mut state, "owner", Some("77/1001 cherri".into()));
+        state.reset_per_request();
+        assert!(state.owner.is_some());
     }
 }
