@@ -8,7 +8,7 @@ mod state;
 use assuan::{StdioSession, Step};
 use clap::Parser as _;
 use cli::Args;
-use fallback::CallerContext;
+use fallback::{CallerContext, CallerEnv};
 use gui::{PinentryApp, Startup};
 use relm4::RelmApp;
 
@@ -43,6 +43,23 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // gpg-agent has now sent its OPTION lines, including the client's pid. the
+    // inherited environment can't tell us about an ssh caller, but the
+    // client's own environment can. we've already greeted the agent, so we
+    // can't exec() a terminal pinentry; hand the session over instead
+    if let Some(owner) = session.state().owner.as_ref()
+        && let Some(caller) = CallerEnv::from_pid(owner.pid)
+        && fallback::should_hand_off(&caller)
+    {
+        let ttytype = session
+            .state()
+            .ttytype
+            .as_deref()
+            .or(ctx.ttytype.as_deref());
+        let candidates = fallback::terminal_candidates(ttytype, ctx.terminal_hint);
+        fallback::hand_off_to_terminal(session, &candidates);
+    }
 
     // prepend argv[0] as required by g_application_run, then append any
     // unrecognized options (e.g. GTK-specific flags) so GTK4 can handle them

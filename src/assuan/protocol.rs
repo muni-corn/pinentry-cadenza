@@ -42,6 +42,23 @@ pub enum Command {
     Unknown(String),
 }
 
+impl Command {
+    /// Returns `true` for commands that configure a dialog and can be replayed
+    /// to another pinentry to reproduce the same state.
+    pub fn is_replayable(&self) -> bool {
+        !matches!(
+            self,
+            Self::GetPin
+                | Self::Confirm { .. }
+                | Self::Message
+                | Self::GetInfo(_)
+                | Self::Bye
+                | Self::Nop
+                | Self::Unknown(_)
+        )
+    }
+}
+
 /// Parses a single Assuan command line into a `Command`.
 pub fn parse_command(line: &str) -> Command {
     let (keyword, rest) = split_first_word(line);

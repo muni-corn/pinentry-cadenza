@@ -34,6 +34,24 @@ pub struct Session<R, W> {
     writer: W,
     state: PinentryState,
     pending: Option<DialogRequest>,
+    /// The raw line of the pending dialog request.
+    pending_line: String,
+    /// Raw lines of the commands that configure a dialog, in arrival order.
+    transcript: Vec<String>,
+}
+
+/// The pieces of a session needed to continue it in another program.
+///
+/// See [`Session::into_handoff`].
+pub struct Handoff<R, W> {
+    /// The client's input, including any data already buffered.
+    pub reader: R,
+    /// The client's output.
+    pub writer: W,
+    /// Raw `OPTION`, `SET*` and `RESET` lines received so far.
+    pub transcript: Vec<String>,
+    /// The raw line of the dialog request that has not been answered yet.
+    pub pending_line: String,
 }
 
 impl Session<BufReader<Stdin>, Stdout> {
@@ -52,6 +70,22 @@ impl<R: BufRead, W: Write> Session<R, W> {
             writer,
             state: PinentryState::default(),
             pending: None,
+            pending_line: String::new(),
+            transcript: Vec::new(),
+        }
+    }
+
+    /// Gives up the session so another program can take over the connection.
+    ///
+    /// Call this right after [`Session::next_dialog`] returned a dialog. The
+    /// other program must be brought up to date by replaying
+    /// [`Handoff::transcript`] and then sending [`Handoff::pending_line`].
+    pub fn into_handoff(self) -> Handoff<R, W> {
+        Handoff {
+            reader: self.reader,
+            writer: self.writer,
+            transcript: self.transcript,
+            pending_line: self.pending_line,
         }
     }
 
@@ -84,14 +118,18 @@ impl<R: BufRead, W: Write> Session<R, W> {
                 return Ok(Step::Closed);
             }
 
-            let line = buf.trim();
+            let line = buf.trim().to_owned();
 
             // skip blank lines and comment lines
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
 
-            if let Some(step) = self.dispatch(parse_command(line))? {
+            let command = parse_command(&line);
+            if command.is_replayable() {
+                self.transcript.push(line.clone());
+            }
+            if let Some(step) = self.dispatch(command, line)? {
                 return Ok(step);
             }
         }
@@ -129,7 +167,7 @@ impl<R: BufRead, W: Write> Session<R, W> {
     }
 
     /// Handles one command. Returns a step if the loop should yield.
-    fn dispatch(&mut self, command: Command) -> Result<Option<Step>> {
+    fn dispatch(&mut self, command: Command, line: String) -> Result<Option<Step>> {
         let out = &mut self.writer;
         let state = &mut self.state;
         match command {
@@ -166,19 +204,21 @@ impl<R: BufRead, W: Write> Session<R, W> {
                 write_ok(out, "closing connection")?;
                 return Ok(Some(Step::Closed));
             }
-            Command::GetPin => return Ok(Some(self.begin(DialogRequest::GetPin))),
+            Command::GetPin => return Ok(Some(self.begin(DialogRequest::GetPin, line))),
             Command::Confirm { one_button } => {
-                return Ok(Some(self.begin(DialogRequest::Confirm { one_button })));
+                let request = DialogRequest::Confirm { one_button };
+                return Ok(Some(self.begin(request, line)));
             }
-            Command::Message => return Ok(Some(self.begin(DialogRequest::Message))),
+            Command::Message => return Ok(Some(self.begin(DialogRequest::Message, line))),
         }
         write_ok(out, "")?;
         Ok(None)
     }
 
     /// Records a pending dialog and returns the step that announces it.
-    fn begin(&mut self, request: DialogRequest) -> Step {
+    fn begin(&mut self, request: DialogRequest, line: String) -> Step {
         self.pending = Some(request);
+        self.pending_line = line;
         Step::Dialog(request)
     }
 }
@@ -295,6 +335,32 @@ mod tests {
             output(&s),
             "ERR 275 unknown command 'FROB'\nD cadenza\nOK\nOK closing connection\n"
         );
+    }
+
+    #[test]
+    fn handoff_carries_replayable_lines_and_the_pending_request() {
+        let mut s = session(
+            "OPTION ttyname=/dev/pts/2\nSETDESC hi\nGETINFO pid\nNOP\nSETPROMPT \
+             pw\nRESET\nGETPIN\n",
+        );
+        s.next_dialog().unwrap();
+        let handoff = s.into_handoff();
+        assert_eq!(handoff.transcript, [
+            "OPTION ttyname=/dev/pts/2",
+            "SETDESC hi",
+            "SETPROMPT pw",
+            "RESET"
+        ]);
+        assert_eq!(handoff.pending_line, "GETPIN");
+    }
+
+    #[test]
+    fn handoff_keeps_input_that_is_still_buffered() {
+        let mut s = session("GETPIN\nBYE\n");
+        s.next_dialog().unwrap();
+        let mut rest = String::new();
+        s.into_handoff().reader.read_line(&mut rest).unwrap();
+        assert_eq!(rest, "BYE\n");
     }
 
     #[test]

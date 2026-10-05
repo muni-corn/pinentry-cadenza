@@ -40,12 +40,16 @@
 //! preferred one is not installed. A `USE_TTY=1` or `USE_CURSES=1` hint in
 //! `PINENTRY_USER_DATA` overrides the terminal type check.
 
+mod caller_env;
 mod context;
 mod exec;
+mod handoff;
 mod user_data;
 
+pub use caller_env::CallerEnv;
 pub use context::CallerContext;
-pub use exec::exec_fallback_pinentry;
+pub use exec::{exec_fallback_pinentry, terminal_candidates};
+pub use handoff::hand_off_to_terminal;
 
 /// Returns `true` if the pinentry should fall back to a terminal-based program.
 ///
@@ -74,6 +78,15 @@ pub fn should_use_curses(ctx: &CallerContext) -> bool {
     }
 
     false
+}
+
+/// Returns `true` if a session that is already in progress should be handed
+/// to a terminal pinentry, judging by the caller's real environment.
+///
+/// This is the counterpart of [`should_use_curses`] for after the assuan
+/// greeting, when `exec()` is no longer possible.
+pub fn should_hand_off(caller: &CallerEnv) -> bool {
+    caller.ssh_session
 }
 
 #[cfg(test)]
@@ -153,5 +166,15 @@ mod tests {
     fn empty_display_treated_as_absent() {
         let c = ctx(Some(""), Some("/dev/pts/1"), false);
         assert!(should_use_curses(&c));
+    }
+
+    #[test]
+    fn ssh_callers_are_handed_off() {
+        assert!(should_hand_off(&CallerEnv { ssh_session: true }));
+    }
+
+    #[test]
+    fn local_callers_keep_the_gui() {
+        assert!(!should_hand_off(&CallerEnv::default()));
     }
 }
