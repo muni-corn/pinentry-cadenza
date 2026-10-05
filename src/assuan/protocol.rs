@@ -3,11 +3,12 @@
 
 use std::io::{self, Write};
 
-// gpg-error codes used in Assuan responses
-pub const ERR_CANCELLED: u32 = 83886205;
-pub const ERR_NOT_CONFIRMED: u32 = 83886179;
+// gpg-error codes used in Assuan responses: the libgpg-error code with
+// GPG_ERR_SOURCE_PINENTRY (5) in the top byte. GPG_ERR_CANCELED is 99,
+// GPG_ERR_NOT_CONFIRMED is 114, and GPG_ERR_NO_PIN_ENTRY is 85.
+pub const ERR_CANCELLED: u32 = 83886179;
+pub const ERR_NOT_CONFIRMED: u32 = 83886194;
 pub const ERR_UNKNOWN_IPC_COMMAND: u32 = 275;
-// GPG_ERR_NO_PIN_ENTRY (85) with GPG_ERR_SOURCE_PINENTRY (5) in the top byte
 pub const ERR_NO_PIN_ENTRY: u32 = 83886165;
 
 /// Parsed representation of an Assuan command.

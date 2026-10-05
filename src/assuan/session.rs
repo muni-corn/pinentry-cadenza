@@ -273,7 +273,8 @@ mod tests {
         let mut s = session("GETPIN\n");
         s.next_dialog().unwrap();
         s.respond(DialogResult::Cancelled).unwrap();
-        assert!(output(&s).starts_with("ERR "));
+        // GPG_ERR_CANCELED from the pinentry source
+        assert_eq!(output(&s), "ERR 83886179 cancelled\n");
     }
 
     #[test]
@@ -288,8 +289,9 @@ mod tests {
         let out = output(&s);
         let lines: Vec<_> = out.lines().collect();
         assert_eq!(lines[0], "OK");
-        assert!(lines[1].ends_with("not confirmed"));
-        assert!(lines[2].ends_with("cancelled"));
+        // GPG_ERR_NOT_CONFIRMED and GPG_ERR_CANCELED from the pinentry source
+        assert_eq!(lines[1], "ERR 83886194 not confirmed");
+        assert_eq!(lines[2], "ERR 83886179 cancelled");
     }
 
     #[test]
